@@ -245,7 +245,7 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{position:'absolute', top:80, left:16, zIndex:20}}>
+      <div style={{position:'fixed', top:16, left:16, zIndex:1000}}>
         <ConnectionPanel conn={conn} setConn={setConn} onConnect={connect} onDisconnect={disconnect} status={status} msgs={msgs} />
         {last && (
           <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.9)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
