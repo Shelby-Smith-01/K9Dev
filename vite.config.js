@@ -1,8 +1,12 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  optimizeDeps: { include: ['mqtt'] },
-  build: { commonjsOptions: { transformMixedEsModules: true } }
-})
+  resolve: {
+    alias: {
+      // Always use the browser bundle for mqtt
+      mqtt: "mqtt/dist/mqtt.min.js",
+    },
+  },
+});
