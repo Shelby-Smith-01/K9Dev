@@ -190,11 +190,6 @@ function useMQTT(conn, onMessage) {
   return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
-  useEffect(() => () => { try { clientRef.current && clientRef.current.end(true); } catch {} }, []);
-
-  return { status, msgs, errorMsg, lastPayload, connect, disconnect };
-}
-
 function Recenter({ lat, lon }) {
   const map = useMap();
   useEffect(() => {
