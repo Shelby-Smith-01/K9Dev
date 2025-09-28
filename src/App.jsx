@@ -1,6 +1,6 @@
 import { createPortal } from "react-dom";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-+ import mqtt from "mqtt/dist/mqtt.min.js";
+import mqtt from "mqtt/dist/mqtt.min.js";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -118,6 +118,7 @@ function useMQTT(conn, onMessage) {
         clean: true,
         keepalive: 30,
         reconnectPeriod: 2500,
+        clientId: `web-${Math.random().toString(16).slice(2)}`,
       });
     } catch (e) {
       setStatus("error");
