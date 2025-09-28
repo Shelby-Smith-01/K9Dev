@@ -1,13 +1,13 @@
 import { createPortal } from "react-dom";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import mqtt from "mqtt/dist/mqtt.min.js";
+import mqtt from "mqtt"; // paired with Vite alias to browser bundle
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
 // --- Utilities ---
 const haversine = (a, b) => {
   if (!a || !b) return 0;
-  const R = 6371000; // meters
+  const R = 6371000; // m
   const toRad = (d) => (d * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
   const dLon = toRad(b.lon - a.lon);
@@ -22,7 +22,6 @@ function prettyDistance(m) {
   if (m < 1000) return `${m.toFixed(1)} m`;
   return `${(m / 1000).toFixed(2)} km`;
 }
-
 function prettyDuration(ms) {
   const s = Math.floor(ms / 1000);
   const hh = Math.floor(s / 3600);
@@ -31,7 +30,6 @@ function prettyDuration(ms) {
   const pad = (n) => n.toString().padStart(2, "0");
   return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
 }
-
 function useInterval(callback, delay) {
   const savedRef = useRef(callback);
   useEffect(() => { savedRef.current = callback; }, [callback]);
@@ -42,7 +40,7 @@ function useInterval(callback, delay) {
   }, [delay]);
 }
 
-// Default connection (works over HTTPS)
+// ---- Default connection (browser via WSS) ----
 const defaultConn = {
   host: "broker.emqx.io",
   port: 8084,
@@ -51,7 +49,7 @@ const defaultConn = {
   topic: "devices/esp-shelby-01/telemetry",
 };
 
-// UI for connection settings
+// ---- Connection Panel ----
 function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs, errorMsg }) {
   return (
     <div style={{padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', maxWidth:420}}>
@@ -83,13 +81,13 @@ function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs,
         <span style={{marginLeft:'auto', fontSize:12, color:'#6b7280'}}>Msgs: {msgs}</span>
       </div>
       {status === 'error' && errorMsg && (
-        <div style={{marginTop:8, fontSize:12, color:'#b91c1c'}}>{errorMsg}</div>
+        <div style={{marginTop:8, fontSize:12, color:'#b91c1c', whiteSpace:'pre-wrap'}}>{errorMsg}</div>
       )}
     </div>
   );
 }
 
-// MQTT hook
+// ---- MQTT Hook (browser/WebSocket) ----
 function useMQTT(conn, onMessage) {
   const [status, setStatus] = useState("idle");
   const [msgs, setMsgs] = useState(0);
@@ -98,17 +96,13 @@ function useMQTT(conn, onMessage) {
   const clientRef = useRef(null);
 
   const connect = () => {
-    try {
-      if (clientRef.current) {
-        clientRef.current.end(true);
-        clientRef.current = null;
-      }
-    } catch {}
-
+    try { clientRef.current?.end(true); } catch {}
+    clientRef.current = null;
     setStatus("connecting");
+    setMsgs(0);
     setErrorMsg("");
 
-    // Normalize inputs
+    // normalize inputs
     const host = (conn.host || "").trim();
     let path = (conn.path || "/mqtt").trim();
     if (!path.startsWith("/")) path = "/" + path;
@@ -135,6 +129,25 @@ function useMQTT(conn, onMessage) {
 
     clientRef.current = c;
 
+    // hook WebSocket events (if available)
+    const hookSocket = () => {
+      try {
+        const ws = c?.stream?.socket;
+        if (ws && !ws.__k9Hooked) {
+          ws.__k9Hooked = true;
+          ws.addEventListener("error", (ev) => {
+            setStatus("error");
+            setErrorMsg((m) => `${m}\nWS error (browser): ${ev?.message || "see console"}`);
+            console.error("WebSocket error", ev);
+          });
+          ws.addEventListener("close", (ev) => {
+            setStatus("error");
+            setErrorMsg((m) => `${m}\nWS close: code=${ev.code} reason=${ev.reason || "(none)"}`);
+          });
+        }
+      } catch {}
+    };
+
     c.on("connect", () => {
       setStatus("connected");
       c.subscribe(conn.topic, { qos: 0 }, (err) => {
@@ -144,19 +157,17 @@ function useMQTT(conn, onMessage) {
         }
       });
     });
-
     c.on("reconnect", () => setStatus("reconnecting"));
     c.on("error", (err) => {
       setStatus("error");
-      setErrorMsg(`MQTT error: ${err?.message || err}`);
+      setErrorMsg((m) => `${m}\nMQTT error: ${err?.message || err}`);
     });
     c.on("close", () => {
-      setStatus("idle");
+      if (status !== "error") setStatus("idle");
     });
-
     c.on("message", (t, payload) => {
       setMsgs((n) => n + 1);
-      const txt = payload ? payload.toString() : "";
+      const txt = payload?.toString() || "";
       setLastPayload(`${t}: ${txt}`);
       try {
         const js = JSON.parse(txt);
@@ -165,36 +176,27 @@ function useMQTT(conn, onMessage) {
         const fix = Boolean(js.fix ?? js.gpsFix ?? true);
         const sats = Number(js.sats ?? js.satellites ?? 0);
         onMessage && onMessage({ lat, lon, fix, sats, raw: js });
-      } catch {
-        // ignore non-JSON
-      }
+      } catch {}
     });
+
+    hookSocket();
+    setTimeout(hookSocket, 750);
   };
 
   const disconnect = () => {
-    try {
-      clientRef.current && clientRef.current.end(true);
-    } catch {}
+    try { clientRef.current?.end(true); } catch {}
     clientRef.current = null;
     setStatus("idle");
   };
 
-  useEffect(() => {
-    return () => {
-      try {
-        clientRef.current && clientRef.current.end(true);
-      } catch {}
-    };
-  }, []);
+  useEffect(() => () => { try { clientRef.current?.end(true); } catch {} }, []);
 
   return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
 function Recenter({ lat, lon }) {
   const map = useMap();
-  useEffect(() => {
-    if (Number.isFinite(lat) && Number.isFinite(lon)) map.setView([lat, lon]);
-  }, [lat, lon, map]);
+  useEffect(() => { if (Number.isFinite(lat) && Number.isFinite(lon)) map.setView([lat, lon]); }, [lat, lon, map]);
   return null;
 }
 
@@ -216,7 +218,7 @@ export default function App() {
   const [recenterOnUpdate, setRecenterOnUpdate] = useState(true);
   const [summary, setSummary] = useState(null);
 
-  const { status, msgs, errorMsg, connect, disconnect } = useMQTT(conn, (msg) => {
+  const { status, msgs, errorMsg, lastPayload, connect, disconnect } = useMQTT(conn, (msg) => {
     if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) {
       setLast(msg);
       if (tab === "k9" && tracking) {
@@ -235,29 +237,22 @@ export default function App() {
   });
 
   // timer for K9 elapsed
-  useInterval(() => {
-    if (tracking && startAt) setElapsed(Date.now() - startAt);
-  }, 1000);
+  useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
 
   const startTrack = () => {
-    setPoints([]);
-    setDistance(0);
-    setStartAt(Date.now());
-    setElapsed(0);
-    setTracking(true);
+    setPoints([]); setDistance(0); setStartAt(Date.now()); setElapsed(0); setTracking(true);
   };
 
   const stopTrack = async () => {
     setTracking(false);
     const durMs = startAt ? Date.now() - startAt : 0;
     const dist = distance;
-    const center = points.length ? points[Math.floor(points.length / 2)] : last;
+    const centerPoint = points.length ? points[Math.floor(points.length / 2)] : last;
 
-    // Simple weather + elevation summaries
     let weather = null; let elevationStats = null;
     try {
-      if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
-        const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then(r=>r.json());
+      if (centerPoint && Number.isFinite(centerPoint.lat) && Number.isFinite(centerPoint.lon)) {
+        const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${centerPoint.lat}&longitude=${centerPoint.lon}&current_weather=true`).then(r=>r.json());
         weather = w?.current_weather || null;
       }
     } catch {}
@@ -301,7 +296,7 @@ export default function App() {
 
   const center = useMemo(() => {
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
-    return [30, -97]; // default (Austin-ish)
+    return [30, -97];
   }, [last]);
 
   return (
@@ -315,100 +310,51 @@ export default function App() {
         </div>
       </div>
 
-      {/* Floating toggle for the panel */}
+      {/* Panel toggle */}
       <button
         onClick={() => setPanelOpen(o => !o)}
-        style={{
-          position: 'fixed',
-          top: 16,
-          right: 16,
-          zIndex: 1001,
-          padding: '8px 12px',
-          borderRadius: 10,
-          background: '#111',
-          color: '#fff',
-          border: 'none',
-          boxShadow: '0 4px 16px rgba(0,0,0,.12)'
-        }}
+        style={{ position:'fixed', top:16, right:16, zIndex:1001, padding:'8px 12px', borderRadius:10, background:'#111', color:'#fff', border:'none', boxShadow:'0 4px 16px rgba(0,0,0,.12)' }}
       >
         {panelOpen ? 'Hide' : 'Connect'}
       </button>
 
-      {/* Connection + Info cards */}
-     {panelOpen && createPortal(
-  <div id="conn-panel" style={{ position: 'fixed', top: 16, left: 16, zIndex: 2147483647 }}>
-    <ConnectionPanel
-      conn={conn}
-      setConn={setConn}
-      onConnect={connect}
-      onDisconnect={disconnect}
-      status={status}
-      msgs={msgs}
-      /* If you added error text earlier, include: errorMsg={errorMsg} */
-    />
+      {/* Connection + Info (in a portal so it sits above the map) */}
+      {panelOpen && createPortal(
+        <div id="conn-panel" style={{ position: 'fixed', top: 16, left: 16, zIndex: 2147483647 }}>
+          <ConnectionPanel
+            conn={conn}
+            setConn={setConn}
+            onConnect={connect}
+            onDisconnect={disconnect}
+            status={status}
+            msgs={msgs}
+            errorMsg={errorMsg}
+          />
 
-    {last && (
-      <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
-        <div style={{fontWeight:600}}>Last fix</div>
-        <div>lat: {Number.isFinite(last.lat)? last.lat.toFixed(6): '—'} lon: {Number.isFinite(last.lon)? last.lon.toFixed(6): '—'}</div>
-        <div>fix: {String(last.fix)} sats: {Number.isFinite(last.sats)? last.sats: '—'}</div>
-        <label style={{display:'flex', alignItems:'center', gap:6}}>
-          <input type="checkbox" checked={recenterOnUpdate} onChange={(e)=>setRecenterOnUpdate(e.target.checked)} /> Recenter on update
-        </label>
-      </div>
-    )}
-
-    {tab === 'k9' && (
-      <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
-        <div style={{fontWeight:600, marginBottom:6}}>K9 Track Controls</div>
-        <div style={{display:'flex', gap:8}}>
-          {!tracking ? (
-            <button onClick={startTrack} style={{padding:'6px 10px', borderRadius:10, background:'#16a34a', color:'#fff'}}>Start</button>
-          ) : (
-            <button onClick={stopTrack} style={{padding:'6px 10px', borderRadius:10, background:'#dc2626', color:'#fff'}}>Stop</button>
-          )}
-          <button onClick={()=>{ setPoints([]); setDistance(0); setElapsed(0); setStartAt(null); setSummary(null); }} style={{padding:'6px 10px', borderRadius:10}}>Clear</button>
-        </div>
-        <div>Time: {prettyDuration(elapsed)}</div>
-        <div>Distance: {prettyDistance(distance)}</div>
-        <label style={{display:'flex', alignItems:'center', gap:6}}>
-          <input type="checkbox" checked={autoBreadcrumbFixOnly} onChange={(e)=>setAutoBreadcrumbFixOnly(e.target.checked)} />
-          Only add crumbs when fix=true
-        </label>
-        {summary && (
-          <div style={{marginTop:8, padding:8, background:'#f1f5f9', borderRadius:8}}>
-            <div style={{fontWeight:600, marginBottom:4}}>Summary</div>
-            <div>Distance: {prettyDistance(summary.distance)}</div>
-            <div>Duration: {prettyDuration(summary.durationMs)}</div>
-            <div>Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : '—'}</div>
-            <div>Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : '—'}</div>
-            <div style={{marginTop:8, display:'flex', gap:8}}>
-              <button onClick={downloadSummary} style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}>Download JSON</button>
+          {status === 'error' && errorMsg && (
+            <div style={{marginTop:8, fontSize:12, color:'#b91c1c', whiteSpace:'pre-wrap', maxWidth:420}}>
+              {errorMsg}
             </div>
-          </div>
-        )}
-      </div>,
-  document.body
-)}
+          )}
+          {lastPayload && (
+            <div style={{marginTop:8, padding:8, background:'rgba(255,255,255,0.95)', border:'1px dashed #94a3b8', borderRadius:12, fontSize:12, maxWidth:420, wordBreak:'break-word'}}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Last payload</div>
+              {lastPayload}
+            </div>
+          )}
 
-      {/* Map */}
-      <div style={{height:'100%'}}>
-        <MapContainer center={useMemo(() => {
-          if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
-          return [30, -97];
-        }, [last])} zoom={13} style={{height:'100%', width:'100%'}}>
-          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
-          {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
-            <Recenter lat={last.lat} lon={last.lon} />
+          {last && (
+            <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
+              <div style={{fontWeight:600}}>Last fix</div>
+              <div>lat: {Number.isFinite(last.lat)? last.lat.toFixed(6): '—'} lon: {Number.isFinite(last.lon)? last.lon.toFixed(6): '—'}</div>
+              <div>fix: {String(last.fix)} sats: {Number.isFinite(last.sats)? last.sats: '—'}</div>
+              <label style={{display:'flex', alignItems:'center', gap:6}}>
+                <input type="checkbox" checked={recenterOnUpdate} onChange={(e)=>setRecenterOnUpdate(e.target.checked)} /> Recenter on update
+              </label>
+            </div>
           )}
-          {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
-            <CircleMarker center={[last.lat, last.lon]} radius={8} pathOptions={{ color: "#111" }} />
-          )}
-          {(tab === 'k9' ? points : []).length > 0 && (
-            <Polyline positions={points.map(p=>[p.lat, p.lon])} pathOptions={{ color: "#2563eb", weight: 4, opacity: 0.9 }} />
-          )}
-        </MapContainer>
-      </div>
-    </div>
-  );
-}
+
+          {tab === 'k9' && (
+            <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
+              <div style={{fontWeight:600, marginBotto
+
