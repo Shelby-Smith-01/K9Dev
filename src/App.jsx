@@ -136,6 +136,7 @@ function Recenter({ lat, lon }) {
 export default function App() {
   const initialTab = (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('view') === 'k9') ? 'k9' : 'live';
   const [tab, setTab] = useState(initialTab); // 'live' | 'k9'
+  const [panelOpen, setPanelOpen] = useState(true);
   const [conn, setConn] = useState(defaultConn);
   const [last, setLast] = useState(null); // {lat, lon, fix, sats, raw}
   const [points, setPoints] = useState([]); // breadcrumb for K9
