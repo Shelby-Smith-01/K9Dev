@@ -1,6 +1,6 @@
 import { createPortal } from "react-dom";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { connect as mqttConnect } from "mqtt"; // alias to avoid name collision
++ import mqtt from "mqtt/dist/mqtt.min.js";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -44,8 +44,8 @@ function useInterval(callback, delay) {
 
 // Default connection (works over HTTPS)
 const defaultConn = {
-  host: "test.mosquitto.org",
-  port: 8081,
+  host: "broker.emqx.io",
+  port: 8084,
   path: "/mqtt",
   ssl: true,
   topic: "devices/esp-shelby-01/telemetry",
@@ -113,7 +113,7 @@ function useMQTT(conn, onMessage) {
 
     let c;
     try {
-      c = mqttConnect(url, {
+      c = mqtt.Connect(url, {
         protocolVersion: 4,   // MQTT 3.1.1
         clean: true,
         keepalive: 30,
