@@ -294,61 +294,61 @@ export default function App() {
       </button>
 
       {/* Connection + Info cards */}
-      {panelOpen && (
-        <div style={{position:'fixed', top:16, left:16, zIndex:1000}}>
-          <ConnectionPanel
-            conn={conn}
-            setConn={setConn}
-            onConnect={connect}
-            onDisconnect={disconnect}
-            status={status}
-            msgs={msgs}
-            errorMsg={errorMsg}
-          />
-          {last && (
-            <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
-              <div style={{fontWeight:600}}>Last fix</div>
-              <div>lat: {Number.isFinite(last.lat)? last.lat.toFixed(6): '—'} lon: {Number.isFinite(last.lon)? last.lon.toFixed(6): '—'}</div>
-              <div>fix: {String(last.fix)} sats: {Number.isFinite(last.sats)? last.sats: '—'}</div>
-              <label style={{display:'flex', alignItems:'center', gap:6}}>
-                <input type="checkbox" checked={recenterOnUpdate} onChange={(e)=>setRecenterOnUpdate(e.target.checked)} /> Recenter on update
-              </label>
-            </div>
-          )}
+     {panelOpen && createPortal(
+  <div id="conn-panel" style={{ position: 'fixed', top: 16, left: 16, zIndex: 2147483647 }}>
+    <ConnectionPanel
+      conn={conn}
+      setConn={setConn}
+      onConnect={connect}
+      onDisconnect={disconnect}
+      status={status}
+      msgs={msgs}
+      /* If you added error text earlier, include: errorMsg={errorMsg} */
+    />
 
-          {tab === 'k9' && (
-            <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
-              <div style={{fontWeight:600, marginBottom:6}}>K9 Track Controls</div>
-              <div style={{display:'flex', gap:8}}>
-                {!tracking ? (
-                  <button onClick={startTrack} style={{padding:'6px 10px', borderRadius:10, background:'#16a34a', color:'#fff'}}>Start</button>
-                ) : (
-                  <button onClick={stopTrack} style={{padding:'6px 10px', borderRadius:10, background:'#dc2626', color:'#fff'}}>Stop</button>
-                )}
-                <button onClick={()=>{ setPoints([]); setDistance(0); setElapsed(0); setStartAt(null); setSummary(null); }} style={{padding:'6px 10px', borderRadius:10}}>Clear</button>
-              </div>
-              <div>Time: {prettyDuration(elapsed)}</div>
-              <div>Distance: {prettyDistance(distance)}</div>
-              <label style={{display:'flex', alignItems:'center', gap:6}}>
-                <input type="checkbox" checked={autoBreadcrumbFixOnly} onChange={(e)=>setAutoBreadcrumbFixOnly(e.target.checked)} />
-                Only add crumbs when fix=true
-              </label>
-              {summary && (
-                <div style={{marginTop:8, padding:8, background:'#f1f5f9', borderRadius:8}}>
-                  <div style={{fontWeight:600, marginBottom:4}}>Summary</div>
-                  <div>Distance: {prettyDistance(summary.distance)}</div>
-                  <div>Duration: {prettyDuration(summary.durationMs)}</div>
-                  <div>Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : '—'}</div>
-                  <div>Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : '—'}</div>
-                  <div style={{marginTop:8, display:'flex', gap:8}}>
-                    <button onClick={downloadSummary} style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}>Download JSON</button>
-                  </div>
-                </div>
-              )}
-            </div>
+    {last && (
+      <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
+        <div style={{fontWeight:600}}>Last fix</div>
+        <div>lat: {Number.isFinite(last.lat)? last.lat.toFixed(6): '—'} lon: {Number.isFinite(last.lon)? last.lon.toFixed(6): '—'}</div>
+        <div>fix: {String(last.fix)} sats: {Number.isFinite(last.sats)? last.sats: '—'}</div>
+        <label style={{display:'flex', alignItems:'center', gap:6}}>
+          <input type="checkbox" checked={recenterOnUpdate} onChange={(e)=>setRecenterOnUpdate(e.target.checked)} /> Recenter on update
+        </label>
+      </div>
+    )}
+
+    {tab === 'k9' && (
+      <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
+        <div style={{fontWeight:600, marginBottom:6}}>K9 Track Controls</div>
+        <div style={{display:'flex', gap:8}}>
+          {!tracking ? (
+            <button onClick={startTrack} style={{padding:'6px 10px', borderRadius:10, background:'#16a34a', color:'#fff'}}>Start</button>
+          ) : (
+            <button onClick={stopTrack} style={{padding:'6px 10px', borderRadius:10, background:'#dc2626', color:'#fff'}}>Stop</button>
           )}
+          <button onClick={()=>{ setPoints([]); setDistance(0); setElapsed(0); setStartAt(null); setSummary(null); }} style={{padding:'6px 10px', borderRadius:10}}>Clear</button>
         </div>
-      )}
+        <div>Time: {prettyDuration(elapsed)}</div>
+        <div>Distance: {prettyDistance(distance)}</div>
+        <label style={{display:'flex', alignItems:'center', gap:6}}>
+          <input type="checkbox" checked={autoBreadcrumbFixOnly} onChange={(e)=>setAutoBreadcrumbFixOnly(e.target.checked)} />
+          Only add crumbs when fix=true
+        </label>
+        {summary && (
+          <div style={{marginTop:8, padding:8, background:'#f1f5f9', borderRadius:8}}>
+            <div style={{fontWeight:600, marginBottom:4}}>Summary</div>
+            <div>Distance: {prettyDistance(summary.distance)}</div>
+            <div>Duration: {prettyDuration(summary.durationMs)}</div>
+            <div>Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : '—'}</div>
+            <div>Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : '—'}</div>
+            <div style={{marginTop:8, display:'flex', gap:8}}>
+              <button onClick={downloadSummary} style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}>Download JSON</button>
+            </div>
+          </div>
+        )}
+      </div>,
+  document.body
+)}
 
       {/* Map */}
       <div style={{height:'100%'}}>
