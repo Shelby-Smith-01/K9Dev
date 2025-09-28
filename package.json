@@ -1,6 +1,6 @@
 {
   "name": "k9-tracker",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "private": true,
   "engines": { "node": "20.x" },
   "scripts": {
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "leaflet": "1.9.4",
-    "mqtt": "^5.10.0",
+    "mqtt": "4.3.7",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-leaflet": "4.2.1"
