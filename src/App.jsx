@@ -111,6 +111,7 @@ function useMQTT(conn, onMessage) {
     const url = `${scheme}://${host}:${port}${path}`;
 
     setErrorMsg(`Connecting to: ${url}`);
+    console.log("MQTT connect URL:", url);
 
     let c;
     try {
@@ -123,18 +124,21 @@ function useMQTT(conn, onMessage) {
       });
     } catch (e) {
       setStatus("error");
-      setErrorMsg(`Client create error: ${e?.message || e}`);
+      setErrorMsg((m) => `${m}\nClient create error: ${e?.message || e}`);
       return;
     }
 
     clientRef.current = c;
 
-    // hook WebSocket events (if available)
+    // Hook WebSocket events regardless of wrapper shape
     const hookSocket = () => {
       try {
-        const ws = c?.stream?.socket;
-        if (ws && !ws.__k9Hooked) {
+        const ws = c?.stream?.socket || c?.stream; // some builds expose .socket, some are the WS directly
+        if (ws && !ws.__k9Hooked && ws.addEventListener) {
           ws.__k9Hooked = true;
+          ws.addEventListener("open", () => {
+            console.log("WebSocket open");
+          });
           ws.addEventListener("error", (ev) => {
             setStatus("error");
             setErrorMsg((m) => `${m}\nWS error (browser): ${ev?.message || "see console"}`);
@@ -143,9 +147,12 @@ function useMQTT(conn, onMessage) {
           ws.addEventListener("close", (ev) => {
             setStatus("error");
             setErrorMsg((m) => `${m}\nWS close: code=${ev.code} reason=${ev.reason || "(none)"}`);
+            console.warn("WebSocket close", ev);
           });
         }
-      } catch {}
+      } catch (e) {
+        console.warn("WS hook error", e);
+      }
     };
 
     c.on("connect", () => {
@@ -153,18 +160,28 @@ function useMQTT(conn, onMessage) {
       c.subscribe(conn.topic, { qos: 0 }, (err) => {
         if (err) {
           setStatus("error");
-          setErrorMsg(`Subscribe error: ${err?.message || err}`);
+          setErrorMsg((m) => `${m}\nSubscribe error: ${err?.message || err}`);
         }
       });
     });
+
     c.on("reconnect", () => setStatus("reconnecting"));
+    c.on("offline", () => {
+      setStatus("error");
+      setErrorMsg((m) => `${m}\nClient offline`);
+    });
+    c.on("end", () => {
+      if (status !== "error") setStatus("idle");
+    });
     c.on("error", (err) => {
       setStatus("error");
       setErrorMsg((m) => `${m}\nMQTT error: ${err?.message || err}`);
+      console.error("mqtt error", err);
     });
     c.on("close", () => {
       if (status !== "error") setStatus("idle");
     });
+
     c.on("message", (t, payload) => {
       setMsgs((n) => n + 1);
       const txt = payload?.toString() || "";
