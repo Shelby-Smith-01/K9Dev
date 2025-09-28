@@ -95,21 +95,33 @@ function useMQTT(conn, onMessage) {
   const [msgs, setMsgs] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const clientRef = useRef(null);
-  const [lastRaw, setLastRaw] = useState("");
-  const [lastPayload, setLastPayload] = useState("");
 
   const connect = () => {
     try { if (clientRef.current) { clientRef.current.end(true); clientRef.current = null; } } catch {}
     setStatus("connecting");
     setErrorMsg("");
 
-    const url = `${conn.ssl ? "wss" : "ws"}://${conn.host}:${conn.port}${conn.path || "/mqtt"}`;
+    // --- Normalize user inputs ---
+    const host = (conn.host || "").trim();
+    let path = (conn.path || "/mqtt").trim();
+    if (!path.startsWith("/")) path = "/" + path;
+    const port = Number(conn.port) || (conn.ssl ? 8084 : 8083);
+    const scheme = conn.ssl ? "wss" : "ws";
+    const url = `${scheme}://${host}:${port}${path}`;
+
+    setErrorMsg(`Connecting to: ${url}`); // show the exact target
+
     let c;
     try {
-      c = mqttConnect(url, { connectTimeout: 6000, clientId: `web-${Math.random().toString(16).slice(2)}` });
+      c = mqttConnect(url, {
+        protocolVersion: 4,   // MQTT 3.1.1
+        clean: true,
+        keepalive: 30,
+        reconnectPeriod: 2500,
+      });
     } catch (e) {
       setStatus("error");
-      setErrorMsg(e?.message || "Client create error");
+      setErrorMsg(`Client create error: ${e?.message || e}`);
       return;
     }
 
@@ -118,29 +130,28 @@ function useMQTT(conn, onMessage) {
     c.on("connect", () => {
       setStatus("connected");
       c.subscribe(conn.topic, { qos: 0 }, (err) => {
-        if (err) { setStatus("error"); setErrorMsg(err?.message || "Subscribe error"); }
+        if (err) { setStatus("error"); setErrorMsg(`Subscribe error: ${err?.message || err}`); }
       });
     });
-    c.on("reconnect", () => setStatus("reconnecting"));
-    c.on("error", (err) => { setStatus("error"); setErrorMsg(err?.message || "MQTT error"); });
-    c.on("close", () => { setStatus("idle"); });
-    c.on("message", (t, payload) => {
-  setMsgs(n => n + 1);
-  const txt = payload.toString();
-  console.log("[MQTT]", t, txt);       // <-- logs to browser console
-  setLastPayload(`${t}: ${txt}`);      // <-- store last raw payload
 
-  try {
-    const js = JSON.parse(txt);
-    const lat = Number(js.lat ?? js.latitude ?? js.Latitude ?? js.Lat);
-    const lon = Number(js.lon ?? js.lng ?? js.longitude ?? js.Longitude ?? js.Lon);
-    const fix = Boolean(js.fix ?? js.gpsFix ?? true);
-    const sats = Number(js.sats ?? js.satellites ?? 0);
-    onMessage && onMessage({ lat, lon, fix, sats, raw: js });
-  } catch {
-    // non-JSON payloads are ignored for map rendering
-  }
-});
+    c.on("reconnect", () => setStatus("reconnecting"));
+
+    // Surface WebSocket-level errors too
+    c.on("error", (err) => { setStatus("error"); setErrorMsg(`MQTT error: ${err?.message || err}`); });
+    c.on("close", () => { if (status !== "error") setStatus("idle"); });
+
+    c.on("message", (_t, payload) => {
+      setMsgs(n => n + 1);
+      try {
+        const txt = payload.toString();
+        const js = JSON.parse(txt);
+        const lat = Number(js.lat ?? js.latitude ?? js.Latitude ?? js.Lat);
+        const lon = Number(js.lon ?? js.lng ?? js.longitude ?? js.Longitude ?? js.Lon);
+        const fix = Boolean(js.fix ?? js.gpsFix ?? true);
+        const sats = Number(js.sats ?? js.satellites ?? 0);
+        onMessage && onMessage({ lat, lon, fix, sats, raw: js });
+      } catch { /* ignore non-JSON */ }
+    });
   };
 
   const disconnect = () => {
@@ -148,6 +159,11 @@ function useMQTT(conn, onMessage) {
     clientRef.current = null;
     setStatus("idle");
   };
+
+  useEffect(() => () => { try { clientRef.current && clientRef.current.end(true); } catch {} }, []);
+
+  return { status, msgs, errorMsg, connect, disconnect };
+}
 
   useEffect(() => () => { try { clientRef.current && clientRef.current.end(true); } catch {} }, []);
 
