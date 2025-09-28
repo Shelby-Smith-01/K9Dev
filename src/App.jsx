@@ -95,6 +95,8 @@ function useMQTT(conn, onMessage) {
   const [msgs, setMsgs] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const clientRef = useRef(null);
+  const [lastRaw, setLastRaw] = useState("");
+  const [lastPayload, setLastPayload] = useState("");
 
   const connect = () => {
     try { if (clientRef.current) { clientRef.current.end(true); clientRef.current = null; } } catch {}
@@ -122,20 +124,23 @@ function useMQTT(conn, onMessage) {
     c.on("reconnect", () => setStatus("reconnecting"));
     c.on("error", (err) => { setStatus("error"); setErrorMsg(err?.message || "MQTT error"); });
     c.on("close", () => { setStatus("idle"); });
-    c.on("message", (_t, payload) => {
-      setMsgs((n)=>n+1);
-      try {
-        const txt = payload.toString();
-        const js = JSON.parse(txt);
-        const lat = Number(js.lat ?? js.latitude ?? js.Latitude ?? js.Lat);
-        const lon = Number(js.lon ?? js.lng ?? js.longitude ?? js.Longitude ?? js.Lon);
-        const fix = Boolean(js.fix ?? js.gpsFix ?? true);
-        const sats = Number(js.sats ?? js.satellites ?? 0);
-        onMessage && onMessage({ lat, lon, fix, sats, raw: js });
-      } catch {
-        // ignore non-JSON messages
-      }
-    });
+    c.on("message", (t, payload) => {
+  setMsgs(n => n + 1);
+  const txt = payload.toString();
+  console.log("[MQTT]", t, txt);       // <-- logs to browser console
+  setLastPayload(`${t}: ${txt}`);      // <-- store last raw payload
+
+  try {
+    const js = JSON.parse(txt);
+    const lat = Number(js.lat ?? js.latitude ?? js.Latitude ?? js.Lat);
+    const lon = Number(js.lon ?? js.lng ?? js.longitude ?? js.Longitude ?? js.Lon);
+    const fix = Boolean(js.fix ?? js.gpsFix ?? true);
+    const sats = Number(js.sats ?? js.satellites ?? 0);
+    onMessage && onMessage({ lat, lon, fix, sats, raw: js });
+  } catch {
+    // non-JSON payloads are ignored for map rendering
+  }
+});
   };
 
   const disconnect = () => {
@@ -146,7 +151,7 @@ function useMQTT(conn, onMessage) {
 
   useEffect(() => () => { try { clientRef.current && clientRef.current.end(true); } catch {} }, []);
 
-  return { status, msgs, errorMsg, connect, disconnect };
+  return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
 function Recenter({ lat, lon }) {
