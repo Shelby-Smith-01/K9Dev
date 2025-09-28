@@ -1,13 +1,13 @@
 import { createPortal } from "react-dom";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import mqtt from "mqtt"; // paired with Vite alias to browser bundle
+import mqtt from "mqtt"; // browser bundle via Vite alias
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
 // --- Utilities ---
 const haversine = (a, b) => {
   if (!a || !b) return 0;
-  const R = 6371000; // m
+  const R = 6371000; // meters
   const toRad = (d) => (d * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
   const dLon = toRad(b.lon - a.lon);
@@ -80,8 +80,10 @@ function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs,
         </span>
         <span style={{marginLeft:'auto', fontSize:12, color:'#6b7280'}}>Msgs: {msgs}</span>
       </div>
-      {status === 'error' && errorMsg && (
-        <div style={{marginTop:8, fontSize:12, color:'#b91c1c', whiteSpace:'pre-wrap'}}>{errorMsg}</div>
+      {errorMsg && (
+        <div style={{marginTop:8, fontSize:12, color: status==='error' ? '#b91c1c' : '#334155', whiteSpace:'pre-wrap'}}>
+          {errorMsg}
+        </div>
       )}
     </div>
   );
@@ -120,7 +122,7 @@ function useMQTT(conn, onMessage) {
         clean: true,
         keepalive: 30,
         reconnectPeriod: 2500,
-        clientId: `web-${Math.random().toString(16).slice(2)}`,
+        clientId: `web-${Math.random().toString(16).slice(2)}`
       });
     } catch (e) {
       setStatus("error");
@@ -130,15 +132,12 @@ function useMQTT(conn, onMessage) {
 
     clientRef.current = c;
 
-    // Hook WebSocket events regardless of wrapper shape
     const hookSocket = () => {
       try {
-        const ws = c?.stream?.socket || c?.stream; // some builds expose .socket, some are the WS directly
+        const ws = c?.stream?.socket || c?.stream;
         if (ws && !ws.__k9Hooked && ws.addEventListener) {
           ws.__k9Hooked = true;
-          ws.addEventListener("open", () => {
-            console.log("WebSocket open");
-          });
+          ws.addEventListener("open", () => console.log("WebSocket open"));
           ws.addEventListener("error", (ev) => {
             setStatus("error");
             setErrorMsg((m) => `${m}\nWS error (browser): ${ev?.message || "see console"}`);
@@ -164,7 +163,6 @@ function useMQTT(conn, onMessage) {
         }
       });
     });
-
     c.on("reconnect", () => setStatus("reconnecting"));
     c.on("offline", () => {
       setStatus("error");
@@ -181,7 +179,6 @@ function useMQTT(conn, onMessage) {
     c.on("close", () => {
       if (status !== "error") setStatus("idle");
     });
-
     c.on("message", (t, payload) => {
       setMsgs((n) => n + 1);
       const txt = payload?.toString() || "";
@@ -253,7 +250,6 @@ export default function App() {
     }
   });
 
-  // timer for K9 elapsed
   useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
 
   const startTrack = () => {
@@ -348,11 +344,6 @@ export default function App() {
             errorMsg={errorMsg}
           />
 
-          {status === 'error' && errorMsg && (
-            <div style={{marginTop:8, fontSize:12, color:'#b91c1c', whiteSpace:'pre-wrap', maxWidth:420}}>
-              {errorMsg}
-            </div>
-          )}
           {lastPayload && (
             <div style={{marginTop:8, padding:8, background:'rgba(255,255,255,0.95)', border:'1px dashed #94a3b8', borderRadius:12, fontSize:12, maxWidth:420, wordBreak:'break-word'}}>
               <div style={{ fontWeight: 600, marginBottom: 4 }}>Last payload</div>
@@ -373,5 +364,54 @@ export default function App() {
 
           {tab === 'k9' && (
             <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
-              <div style={{fontWeight:600, marginBotto
+              <div style={{fontWeight:600, marginBottom:6}}>K9 Track Controls</div>
+              <div style={{display:'flex', gap:8}}>
+                {!tracking ? (
+                  <button onClick={startTrack} style={{padding:'6px 10px', borderRadius:10, background:'#16a34a', color:'#fff'}}>Start</button>
+                ) : (
+                  <button onClick={stopTrack} style={{padding:'6px 10px', borderRadius:10, background:'#dc2626', color:'#fff'}}>Stop</button>
+                )}
+                <button onClick={()=>{ setPoints([]); setDistance(0); setElapsed(0); setStartAt(null); setSummary(null); }} style={{padding:'6px 10px', borderRadius:10}}>Clear</button>
+              </div>
+              <div>Time: {prettyDuration(elapsed)}</div>
+              <div>Distance: {prettyDistance(distance)}</div>
+              <label style={{display:'flex', alignItems:'center', gap:6}}>
+                <input type="checkbox" checked={autoBreadcrumbFixOnly} onChange={(e)=>setAutoBreadcrumbFixOnly(e.target.checked)} />
+                Only add crumbs when fix=true
+              </label>
+              {summary && (
+                <div style={{marginTop:8, padding:8, background:'#f1f5f9', borderRadius:8}}>
+                  <div style={{fontWeight:600, marginBottom:4}}>Summary</div>
+                  <div>Distance: {prettyDistance(summary.distance)}</div>
+                  <div>Duration: {prettyDuration(summary.durationMs)}</div>
+                  <div>Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : '—'}</div>
+                  <div>Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : '—'}</div>
+                  <div style={{marginTop:8, display:'flex', gap:8}}>
+                    <button onClick={downloadSummary} style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}>Download JSON</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>,
+        document.body
+      )}
 
+      {/* Map */}
+      <div style={{height:'100%'}}>
+        <MapContainer center={center} zoom={13} style={{height:'100%', width:'100%'}}>
+          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+          {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
+            <Recenter lat={last.lat} lon={last.lon} />
+          )}
+          {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
+            <CircleMarker center={[last.lat, last.lon]} radius={8} pathOptions={{ color: "#111" }} />
+          )}
+          {(tab === 'k9' ? points : []).length > 0 && (
+            <Polyline positions={points.map(p=>[p.lat, p.lon])} pathOptions={{ color: "#2563eb", weight: 4, opacity: 0.9 }} />
+          )}
+        </MapContainer>
+      </div>
+    </div>
+  );
+}
