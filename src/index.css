@@ -1,3 +1,5 @@
 html, body, #root { height: 100%; margin: 0; }
 .leaflet-container { height: 100%; width: 100%; }
 * { box-sizing: border-box; }
+#conn-panel { pointer-events: auto; }
+.leaflet-container { z-index: 0 !important; }
