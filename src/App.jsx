@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { connect } from "mqtt";
+import { connect as mqttConnect } from "mqtt";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -84,7 +84,7 @@ function useMQTT(conn, onMessage) {
     const url = `${conn.ssl?"wss":"ws"}://${conn.host}:${conn.port}${conn.path || "/mqtt"}`;
     let c;
     try {
-     c = connect(url, { connectTimeout: 6000, clientId: `web-${Math.random().toString(16).slice(2)}` });
+    c = mqttConnect(url, { connectTimeout: 6000, clientId: `web-${Math.random().toString(16).slice(2)}` });
     } catch (e) {
       setStatus("error");
       console.error("client create error", e);
