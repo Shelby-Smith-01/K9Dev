@@ -5,8 +5,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      // Always use the browser bundle for mqtt
-      mqtt: "mqtt/dist/mqtt.min.js",
+      mqtt: "mqtt/dist/mqtt.min.js", // use browser bundle
     },
   },
 });
