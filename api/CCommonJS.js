@@ -4,21 +4,24 @@
 
 const mqtt = require("mqtt");
 
-// No runtime config needed. If you keep one, use:  export const config = { runtime: "nodejs" };
-
 module.exports = (req, res) => {
   // SSE headers
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders && res.flushHeaders();
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    // "Access-Control-Allow-Origin": "*", // uncomment if calling from another domain
+  });
+
+  // Keep lambda socket from timing out
+  if (req.socket && req.socket.setTimeout) req.socket.setTimeout(0);
 
   // Query params
   const {
     host = "mqtt.eclipseprojects.io",
     port = "",
     topic = "devices/#",
-    ssl = "0",          // "1" = TLS (defaults 8883), "0" = TCP (defaults 1883)
+    ssl = "0",          // "1" = TLS (mqtts, default 8883), "0" = TCP (mqtt, default 1883)
     user = "",
     pass = "",
     insecure = "0",     // "1" = allow self-signed (testing only)
@@ -28,7 +31,7 @@ module.exports = (req, res) => {
 
   const isTLS = ssl === "1";
   const p = Number(port) || (isTLS ? 8883 : 1883);
-  const url = `${isTLS ? "tls" : "mqtt"}://${host}:${p}`;
+  const url = `${isTLS ? "mqtts" : "mqtt"}://${host}:${p}`;
 
   const opts = {
     protocolVersion: 4, // MQTT 3.1.1
@@ -40,7 +43,6 @@ module.exports = (req, res) => {
   if (pass) opts.password = pass;
   if (isTLS && insecure === "1") opts.rejectUnauthorized = false;
 
-  // helper to write SSE data lines
   const send = (obj, event) => {
     if (event) res.write(`event: ${event}\n`);
     res.write(`data: ${JSON.stringify(obj)}\n\n`);
@@ -50,7 +52,7 @@ module.exports = (req, res) => {
 
   const client = mqtt.connect(url, opts);
 
-  // keep connection alive through proxies
+  // keep proxies from closing idle connections
   const ka = setInterval(() => res.write(`: ping ${Date.now()}\n\n`), 25000);
 
   client.on("connect", () => {
