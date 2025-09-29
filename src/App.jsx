@@ -1,3 +1,4 @@
+// src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
@@ -18,32 +19,27 @@ const haversine = (a, b) => {
   return 2 * R * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 };
 
-const pathDistance = (arr) =>
-  arr.reduce((sum, p, i) => (i ? sum + haversine(arr[i - 1], p) : 0), 0);
+const pathDistance = (arr) => arr.reduce((sum, p, i) => (i ? sum + haversine(arr[i - 1], p) : 0), 0);
 
-function prettyDistance(m) {
-  if (!Number.isFinite(m)) return "—";
-  if (m < 1000) return `${m.toFixed(1)} m`;
-  return `${(m / 1000).toFixed(2)} km`;
-}
+const prettyDistance = (m) => (!Number.isFinite(m) ? "—" : m < 1000 ? `${m.toFixed(1)} m` : `${(m / 1000).toFixed(2)} km`);
 
-function prettyDuration(ms) {
+const prettyDuration = (ms) => {
   if (!Number.isFinite(ms)) return "—";
-  const s = Math.floor(ms / 1000);
-  const hh = Math.floor(s / 3600);
-  const mm = Math.floor((s % 3600) / 60);
-  const ss = s % 60;
+  const s = Math.floor(ms / 1000), hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
   const pad = (n) => n.toString().padStart(2, "0");
   return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
-}
+};
 
 const fmtPace = (minPerKm) =>
-  minPerKm ? `${Math.floor(minPerKm)}:${String(Math.round((minPerKm % 1) * 60)).padStart(2, "0")} /km` : "—";
+  (Number.isFinite(minPerKm) && minPerKm > 0)
+    ? `${Math.floor(minPerKm)}:${String(Math.round((minPerKm % 1) * 60)).padStart(2, "0")} /km`
+    : "—";
+
 const fmtSpeed = (kmh) => (Number.isFinite(kmh) ? `${kmh.toFixed(2)} km/h` : "—");
 
-function useInterval(callback, delay) {
-  const saved = useRef(callback);
-  useEffect(() => { saved.current = callback; }, [callback]);
+function useInterval(cb, delay) {
+  const saved = useRef(cb);
+  useEffect(() => { saved.current = cb; }, [cb]);
   useEffect(() => {
     if (delay == null) return;
     const id = setInterval(() => saved.current(), delay);
@@ -51,14 +47,12 @@ function useInterval(callback, delay) {
   }, [delay]);
 }
 
-/* Fit map to a set of points once they’re known */
 function FitTo({ points }) {
   const map = useMap();
   useEffect(() => {
-    if (points && points.length) {
+    if (points?.length) {
       const latlngs = points.map((p) => [p.lat, p.lon]);
-      const bounds = L.latLngBounds(latlngs);
-      map.fitBounds(bounds, { padding: [40, 40] });
+      map.fitBounds(L.latLngBounds(latlngs), { padding: [40, 40] });
     }
   }, [points, map]);
   return null;
@@ -68,20 +62,20 @@ function FitTo({ points }) {
 
 const defaultConn = {
   host: "broker.emqx.io",
-  port: 1883,          // using SSE → TCP MQTT
-  path: "/mqtt",       // ignored by SSE, kept for UI consistency
-  ssl: false,          // for SSE: 1883=false, 8883=true
+  port: 1883,                 // SSE backend connects TCP MQTT
+  path: "/mqtt",              // (kept for UI only)
+  ssl: false,                 // 8883 for true, 1883 for false
   topic: "devices/esp-shelby-01/telemetry",
-  useSSE: true,        // this build supports SSE only
+  useSSE: true,               // required in this build
 };
 
-/* ===================== UI: Connection Panel ===================== */
+/* ===================== Connection Panel ===================== */
 
 function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs, errorMsg, lastPayload, crumbCount }) {
   return (
     <div style={{ padding: 12, background: "rgba(255,255,255,0.95)", border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)", maxWidth: 480 }}>
       <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-        MQTT {conn.useSSE ? "via SSE backend" : "WebSocket"} {conn.useSSE ? "(recommended)" : ""}
+        MQTT via SSE backend (proxy)
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -105,7 +99,7 @@ function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs,
 
       <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
         <input type="checkbox" checked={conn.useSSE} onChange={(e) => setConn({ ...conn, useSSE: e.target.checked })} />
-        Use backend SSE proxy (required in this build)
+        Use backend SSE proxy (required)
       </label>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 13 }}>
@@ -136,7 +130,7 @@ function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs,
   );
 }
 
-/* ===================== MQTT over SSE Hook ===================== */
+/* ===================== MQTT via SSE Hook ===================== */
 
 function useMQTT_SSE(conn, onMessage) {
   const [status, setStatus] = useState("idle");
@@ -146,18 +140,13 @@ function useMQTT_SSE(conn, onMessage) {
   const esRef = useRef(null);
 
   const connect = () => {
-    // This build only supports SSE; enforce it
     if (!conn.useSSE) {
       setStatus("error");
       setErrorMsg("This build uses the backend SSE proxy only. Enable 'Use backend SSE proxy'.");
       return;
     }
-
     try { esRef.current && esRef.current.close(); } catch {}
-    esRef.current = null;
-    setMsgs(0);
-    setErrorMsg("");
-    setStatus("connecting");
+    esRef.current = null; setMsgs(0); setErrorMsg(""); setStatus("connecting");
 
     const host = (conn.host || "").trim();
     const port = Number(conn.port) || (conn.ssl ? 8883 : 1883);
@@ -171,22 +160,11 @@ function useMQTT_SSE(conn, onMessage) {
     esRef.current = es;
 
     es.onmessage = (ev) => {
-      // Normal events: {connecting|connected|subscribed|topic/payload|error}
       try {
         const d = JSON.parse(ev.data || "{}");
-        if (d.error) {
-          setStatus("error");
-          setErrorMsg((m) => `${m}\nAPI error: ${d.error}`);
-          return;
-        }
-        if (d.connected) {
-          setStatus("connected");
-          return;
-        }
-        if (d.subscribed) {
-          // keep status as connected
-          return;
-        }
+        if (d.error) { setStatus("error"); setErrorMsg((m) => `${m}\nAPI error: ${d.error}`); return; }
+        if (d.connected) { setStatus("connected"); return; }
+        if (d.subscribed) { return; }
         if (d.topic && typeof d.payload === "string") {
           setMsgs((n) => n + 1);
           setLastPayload(`${d.topic}: ${d.payload}`);
@@ -197,18 +175,13 @@ function useMQTT_SSE(conn, onMessage) {
             const fix = Boolean(js.fix ?? js.gpsFix ?? true);
             const sats = Number(js.sats ?? js.satellites ?? 0);
             onMessage && onMessage({ lat, lon, fix, sats, raw: js });
-          } catch {
-            // Non-JSON payloads are ignored for map
-          }
+          } catch {}
         }
-      } catch {
-        // ignore unparsable lines
-      }
+      } catch {}
     };
 
     es.addEventListener("diag", (ev) => {
-      // server-sent diagnostics
-      if (ev && ev.data) setErrorMsg((m) => `${m}\n${ev.data}`);
+      if (ev?.data) setErrorMsg((m) => `${m}\n${ev.data}`);
     });
 
     es.onerror = () => {
@@ -220,12 +193,10 @@ function useMQTT_SSE(conn, onMessage) {
 
   const disconnect = () => {
     try { esRef.current && esRef.current.close(); } catch {}
-    esRef.current = null;
-    setStatus("idle");
+    esRef.current = null; setStatus("idle");
   };
 
   useEffect(() => () => { try { esRef.current && esRef.current.close(); } catch {} }, []);
-
   return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
@@ -233,21 +204,18 @@ function useMQTT_SSE(conn, onMessage) {
 
 function Recenter({ lat, lon }) {
   const map = useMap();
-  useEffect(() => {
-    if (Number.isFinite(lat) && Number.isFinite(lon)) map.setView([lat, lon]);
-  }, [lat, lon, map]);
+  useEffect(() => { if (Number.isFinite(lat) && Number.isFinite(lon)) map.setView([lat, lon]); }, [lat, lon, map]);
   return null;
 }
 
 export default function App() {
   const initialTab = (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === "k9") ? "k9" : "live";
-
-  const [tab, setTab] = useState(initialTab);           // 'live' | 'k9'
+  const [tab, setTab] = useState(initialTab);
   const [panelOpen, setPanelOpen] = useState(true);
   const [conn, setConn] = useState(defaultConn);
 
-  const [last, setLast] = useState(null);               // {lat, lon, fix, sats, raw}
-  const [points, setPoints] = useState([]);             // breadcrumbs (session)
+  const [last, setLast] = useState(null);
+  const [points, setPoints] = useState([]);
   const [tracking, setTracking] = useState(false);
   const [startAt, setStartAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);
@@ -256,135 +224,131 @@ export default function App() {
   const [recenterOnUpdate, setRecenterOnUpdate] = useState(true);
   const [summary, setSummary] = useState(null);
 
-  // Saved/shared tracks
+  // persistence state
   const [trackId, setTrackId] = useState(null);
   const [shareCode, setShareCode] = useState(null);
-  const [loadedTrack, setLoadedTrack] = useState(null);     // {id, shareCode, points[], distance_m, duration_ms, ...}
-  const [loadUiOpen, setLoadUiOpen] = useState(false);
-  const [loadInput, setLoadInput] = useState("");
+
+  // optional: load a saved track by id in URL (?track=<uuid>)
+  const [loadedTrack, setLoadedTrack] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const sp = new URLSearchParams(window.location.search);
+        const id = sp.get("track");
+        if (!id) return;
+        const r = await fetch(`/api/tracks/get?id=${encodeURIComponent(id)}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const pts = Array.isArray(d.points) ? d.points
+          .map((p) => ({ lat: Number(p.lat), lon: Number(p.lon), ts: Number(p.ts) || Date.parse(p.ts) || Date.now() }))
+          .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon)) : [];
+        setLoadedTrack({
+          points: pts,
+          distance_m: Number(d.distance_m) || pathDistance(pts),
+          duration_ms: Number(d.duration_ms) || (Date.parse(d.ended_at) - Date.parse(d.started_at)) || 0,
+          weather: d.weather || null, elevation: d.elevation || null,
+        });
+      } catch {}
+    })();
+  }, []);
 
   const { status, msgs, errorMsg, lastPayload, connect, disconnect } = useMQTT_SSE(conn, (msg) => {
     if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) {
       setLast(msg);
-      if (tracking) {
-        if (!autoBreadcrumbFixOnly || msg.fix) {
-          setPoints((prev) => {
-            const next = [...prev, { lat: msg.lat, lon: msg.lon, ts: Date.now() }];
-            if (next.length > 1) {
-              const seg = haversine(next[next.length - 2], next[next.length - 1]);
-              setDistance((d) => d + seg);
-            }
-            return next;
-          });
-        }
+      if (tracking && (!autoBreadcrumbFixOnly || msg.fix)) {
+        setPoints((prev) => {
+          const next = [...prev, { lat: msg.lat, lon: msg.lon, ts: Date.now() }];
+          if (next.length > 1) setDistance((d) => d + haversine(next[next.length - 2], next[next.length - 1]));
+          return next;
+        });
       }
     }
   });
 
   // K9 timer
-  useInterval(() => {
-    if (tracking && startAt) setElapsed(Date.now() - startAt);
-  }, 1000);
+  useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
 
+  // START: create a track row
   const startTrack = async () => {
-  setPoints([]); setDistance(0); setStartAt(Date.now()); setElapsed(0);
-  setTracking(true); setSummary(null); setTrackId(null); setShareCode(null);
+    setPoints([]); setDistance(0); setStartAt(Date.now()); setElapsed(0);
+    setTracking(true); setSummary(null); setTrackId(null); setShareCode(null);
 
-  try {
-    const r = await fetch("/api/tracks/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        deviceId: (conn.topic.split("/")[1] || "unknown"),
-        topic: conn.topic,
-        startedAt: new Date().toISOString(),
-      }),
-    }).then(res => res.json());
-    if (r?.id) { setTrackId(r.id); setShareCode(r.shareCode); }
-  } catch (e) {
-    console.warn("tracks/create failed:", e);
-  }
-};
-
-  const stopTrack = async () => {
-  setTracking(false);
-
-  const dist = pathDistance(points);                 // recompute
-  const durMs = startAt ? Date.now() - startAt : 0;
-  const center = points.length ? points[Math.floor(points.length / 2)] : last;
-
-  let weather = null, elevationStats = null;
-  try {
-    if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
-      const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then(r=>r.json());
-      weather = w?.current_weather || null;
-    }
-  } catch {}
-  try {
-    if (points.length) {
-      const sample = points.filter((_, i) => i % Math.max(1, Math.floor(points.length / 100)) === 0);
-      const locs = sample.map(p => `${p.lat},${p.lon}`).join("|");
-      const e = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`).then(r=>r.json());
-      const els = e?.results?.map(r => r.elevation).filter(Number.isFinite) || [];
-      if (els.length) {
-        let gain=0, loss=0;
-        for (let i=1;i<els.length;i++) { const d = els[i]-els[i-1]; if (d>0) gain+=d; else loss+=Math.abs(d); }
-        elevationStats = { gain, loss };
-      }
-    }
-  } catch {}
-
-  setDistance(dist);
-  setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
-
-  // persist
-  if (trackId) {
     try {
-      const r = await fetch("/api/tracks/finish", {
+      const r = await fetch("/api/tracks/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: trackId,
-          endedAt: new Date().toISOString(),
-          distance_m: dist,
-          duration_ms: durMs,
-          weather,
-          elevation: elevationStats,
-          points,
+          deviceId: (conn.topic.split("/")[1] || "unknown"),
+          topic: conn.topic,
+          startedAt: new Date().toISOString(),
         }),
-      }).then(res => res.json());
-      if (r?.shareCode) setShareCode(r.shareCode);
+      }).then((res) => res.json());
+      if (r?.id) { setTrackId(r.id); setShareCode(r.shareCode); }
     } catch (e) {
-      console.warn("tracks/finish failed:", e);
+      console.warn("tracks/create failed:", e);
     }
-  }
-};
+  };
+
+  // STOP: finalize and save the track
+  const stopTrack = async () => {
+    setTracking(false);
+
+    const dist = pathDistance(points);                 // recompute precisely
+    const durMs = startAt ? Date.now() - startAt : 0;
+    const center = points.length ? points[Math.floor(points.length / 2)] : last;
+
+    let weather = null, elevationStats = null;
+    try {
+      if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
+        const w = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`
+        ).then((r) => r.json());
+        weather = w?.current_weather || null;
+      }
+    } catch {}
+    try {
+      if (points.length) {
+        const sample = points.filter((_, i) => i % Math.max(1, Math.floor(points.length / 100)) === 0);
+        const locs = sample.map((p) => `${p.lat},${p.lon}`).join("|");
+        const e = await fetch(
+          `https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`
+        ).then((r) => r.json());
+        const els = e?.results?.map((r) => r.elevation).filter(Number.isFinite) || [];
+        if (els.length) {
+          let gain = 0, loss = 0;
+          for (let i = 1; i < els.length; i++) {
+            const d = els[i] - els[i - 1];
+            if (d > 0) gain += d; else loss += Math.abs(d);
+          }
+          elevationStats = { gain, loss };
+        }
+      }
+    } catch {}
 
     setDistance(dist);
-  setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
+    setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
 
-  // persist
-  if (trackId) {
-    try {
-      const r = await fetch("/api/tracks/finish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: trackId,
-          endedAt: new Date().toISOString(),
-          distance_m: dist,
-          duration_ms: durMs,
-          weather,
-          elevation: elevationStats,
-          points,
-        }),
-      }).then(res => res.json());
-      if (r?.shareCode) setShareCode(r.shareCode);
-    } catch (e) {
-      console.warn("tracks/finish failed:", e);
+    if (trackId) {
+      try {
+        const r = await fetch("/api/tracks/finish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: trackId,
+            endedAt: new Date().toISOString(),
+            distance_m: dist,
+            duration_ms: durMs,
+            weather,
+            elevation: elevationStats,
+            points,
+          }),
+        }).then((res) => res.json());
+        if (r?.shareCode) setShareCode(r.shareCode);
+      } catch (e) {
+        console.warn("tracks/finish failed:", e);
+      }
     }
-  }
-};
+  };
 
   const downloadSummary = () => {
     if (!summary) return;
@@ -402,59 +366,13 @@ export default function App() {
     const a = document.createElement("a");
     a.href = url; a.download = `k9_track_${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
     a.click(); URL.revokeObjectURL(url);
-    
   };
-
-  // Load saved/shared track (by id or share code)
-  async function loadTrackBy({ id, share }) {
-    const qs = id ? `id=${encodeURIComponent(id)}` : `share=${encodeURIComponent(share)}`;
-    const r = await fetch(`/api/tracks/get?${qs}`);
-    if (!r.ok) throw new Error(await r.text());
-    const d = await r.json();
-    const pts = Array.isArray(d.points)
-      ? d.points
-          .map((p) => ({ lat: Number(p.lat), lon: Number(p.lon), ts: Number(p.ts) || Date.parse(p.ts) || Date.now() }))
-          .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
-      : [];
-    setLoadedTrack({
-      id: d.id,
-      shareCode: d.share_code,
-      points: pts,
-      distance_m: Number(d.distance_m) || pathDistance(pts),
-      duration_ms: Number(d.duration_ms) || (Date.parse(d.ended_at) - Date.parse(d.started_at)) || 0,
-      weather: d.weather || null,
-      elevation: d.elevation || null,
-      started_at: d.started_at,
-      ended_at: d.ended_at,
-    });
-    setTab("k9");
-    setPanelOpen(true);
-  }
-
-  function clearLoadedTrack() {
-    setLoadedTrack(null);
-  }
-
-  // Auto-load by URL (?track=uuid or ?share=CODE)
-  useEffect(() => {
-    try {
-      const sp = new URLSearchParams(window.location.search);
-      const id = sp.get("track");
-      const share = sp.get("share");
-      if (id || share) {
-        loadTrackBy(id ? { id } : { share }).catch((e) => console.error("loadTrack err", e));
-      }
-    } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const center = useMemo(() => {
     if (loadedTrack?.points?.length) return [loadedTrack.points[0].lat, loadedTrack.points[0].lon];
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
-    return [30, -97]; // default
+    return [30, -97];
   }, [last, loadedTrack]);
-
-  /* ===================== Render ===================== */
 
   return (
     <div style={{ height: "100%", width: "100%", background: "#f8fafc" }}>
@@ -470,16 +388,12 @@ export default function App() {
       {/* Floating toggle for the panel */}
       <button
         onClick={() => setPanelOpen((o) => !o)}
-        style={{
-          position: "fixed", top: 16, right: 16, zIndex: 1001,
-          padding: "8px 12px", borderRadius: 10, background: "#111", color: "#fff",
-          border: "none", boxShadow: "0 4px 16px rgba(0,0,0,.12)"
-        }}
+        style={{ position: "fixed", top: 16, right: 16, zIndex: 1001, padding: "8px 12px", borderRadius: 10, background: "#111", color: "#fff", border: "none", boxShadow: "0 4px 16px rgba(0,0,0,.12)" }}
       >
         {panelOpen ? "Hide" : "Connect"}
       </button>
 
-      {/* Connection + Info cards (portal so they float above the map) */}
+      {/* Connection + Info cards */}
       {panelOpen && createPortal(
         <div id="conn-panel" style={{ position: "fixed", top: 16, left: 16, zIndex: 2147483647 }}>
           <ConnectionPanel
@@ -505,7 +419,6 @@ export default function App() {
             </div>
           )}
 
-          {/* K9 Controls + Summary */}
           {tab === "k9" && (
             <div style={{ marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)", border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)", fontSize: 12, maxWidth: 480 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>K9 Track Controls</div>
@@ -524,40 +437,6 @@ export default function App() {
                 Only add crumbs when fix=true
               </label>
 
-              {/* Load saved track UI */}
-              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed #e5e7eb" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ fontWeight: 600 }}>Load saved track</div>
-                  <button onClick={() => setLoadUiOpen((o) => !o)} style={{ padding: "4px 8px", borderRadius: 8 }}>{loadUiOpen ? "Hide" : "Show"}</button>
-                </div>
-                {loadUiOpen && (
-                  <div style={{ marginTop: 8 }}>
-                    <div style={{ fontSize: 12, color: "#475569", marginBottom: 6 }}>Paste a Track ID (UUID) or Share Code:</div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input value={loadInput} onChange={(e) => setLoadInput(e.target.value)} placeholder="UUID or SHARECODE" style={{ flex: 1 }} />
-                      <button
-                        onClick={() => {
-                          const v = (loadInput || "").trim();
-                          if (!v) return;
-                          const isUUID = /^[0-9a-fA-F-]{20,}$/.test(v);
-                          loadTrackBy(isUUID ? { id: v } : { share: v }).catch((err) => alert(`Load failed: ${err.message || err}`));
-                        }}
-                        style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}
-                      >
-                        Load
-                      </button>
-                    </div>
-                    {loadedTrack && (
-                      <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                        <button onClick={clearLoadedTrack} style={{ padding: "6px 10px", borderRadius: 10 }}>Clear loaded</button>
-                        <a href={`/?track=${loadedTrack.id}`} style={{ fontSize: 12 }}>Share link</a>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Summary block after Stop */}
               {summary && (
                 <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
                   <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
@@ -567,16 +446,13 @@ export default function App() {
                     const km = summary.distance / 1000;
                     const pace = km > 0 ? (summary.durationMs / 60000) / km : null;
                     const speed = summary.durationMs > 0 ? km / (summary.durationMs / 3600000) : null;
-                    return (
-                      <>
-                        <div>Pace: {fmtPace(pace)}</div>
-                        <div>Avg Speed: {fmtSpeed(speed)}</div>
-                      </>
-                    );
+                    return (<><div>Pace: {fmtPace(pace)}</div><div>Avg Speed: {fmtSpeed(speed)}</div></>);
                   })()}
                   <div>Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}</div>
                   <div>Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}</div>
-
+                  <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                    <button onClick={downloadSummary} style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>Download JSON</button>
+                  </div>
                   {trackId && (
                     <div style={{ marginTop: 8 }}>
                       <div style={{ fontSize: 12, color: "#475569" }}>Share:</div>
@@ -585,10 +461,6 @@ export default function App() {
                       </a>
                     </div>
                   )}
-
-                  <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                    <button onClick={downloadSummary} style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>Download JSON</button>
-                  </div>
                 </div>
               )}
             </div>
@@ -602,7 +474,7 @@ export default function App() {
         <MapContainer center={center} zoom={13} style={{ height: "100%", width: "100%" }}>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
 
-          {/* Auto recenter to live point if enabled & not viewing a loaded track */}
+          {/* Recenter to live when not viewing a saved track */}
           {recenterOnUpdate && !loadedTrack && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
             <Recenter lat={last.lat} lon={last.lon} />
           )}
@@ -618,13 +490,10 @@ export default function App() {
           )}
 
           {/* Loaded/saved track (green) */}
-          {loadedTrack && loadedTrack.points && loadedTrack.points.length > 0 && (
+          {loadedTrack?.points?.length > 0 && (
             <>
               <FitTo points={loadedTrack.points} />
-              <Polyline
-                positions={loadedTrack.points.map((p) => [p.lat, p.lon])}
-                pathOptions={{ color: "#10b981", weight: 4, opacity: 0.95 }}
-              />
+              <Polyline positions={loadedTrack.points.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#10b981", weight: 4, opacity: 0.95 }} />
               <CircleMarker center={[loadedTrack.points[0].lat, loadedTrack.points[0].lon]} radius={6} pathOptions={{ color: "#059669" }} />
               <CircleMarker center={[loadedTrack.points[loadedTrack.points.length - 1].lat, loadedTrack.points[loadedTrack.points.length - 1].lon]} radius={6} pathOptions={{ color: "#065f46" }} />
             </>
