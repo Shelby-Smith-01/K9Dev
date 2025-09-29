@@ -18,7 +18,7 @@ module.exports = (req, res) => {
 
   // Query params
   const {
-    host = "mqtt.eclipseprojects.io",
+    host = "broker.emqx.io",
     port = "",
     topic = "devices/#",
     ssl = "0",          // "1" = TLS (mqtts, default 8883), "0" = TCP (mqtt, default 1883)
