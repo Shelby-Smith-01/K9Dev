@@ -1,32 +1,24 @@
 // api/stream.js
-// Streams MQTT messages to the browser via Server-Sent Events (SSE).
-// Ensure package.json has:  "mqtt": "4.3.7"
-
 const mqtt = require("mqtt");
 
 module.exports = (req, res) => {
-  // SSE headers
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    // "Access-Control-Allow-Origin": "*", // uncomment if calling from another domain
+    "Connection": "keep-alive"
   });
-
-  // Keep lambda socket from timing out
-  if (req.socket && req.socket.setTimeout) req.socket.setTimeout(0);
 
   // Query params
   const {
     host = "broker.emqx.io",
     port = "",
     topic = "devices/#",
-    ssl = "0",          // "1" = TLS (mqtts, default 8883), "0" = TCP (mqtt, default 1883)
+    ssl = "0",          // "1" -> MQTT over TLS (mqtts), "0" -> plain TCP (mqtt)
     user = "",
     pass = "",
-    insecure = "0",     // "1" = allow self-signed (testing only)
+    insecure = "0",     // "1" -> allow self-signed (testing only)
     keepalive = "30",
-    clientId = "",
+    clientId = ""
   } = req.query || {};
 
   const isTLS = ssl === "1";
@@ -34,7 +26,7 @@ module.exports = (req, res) => {
   const url = `${isTLS ? "mqtts" : "mqtt"}://${host}:${p}`;
 
   const opts = {
-    protocolVersion: 4, // MQTT 3.1.1
+    protocolVersion: 4,
     clean: true,
     keepalive: Number(keepalive) || 30,
     clientId: clientId || `sse-${Math.random().toString(16).slice(2)}`
@@ -48,17 +40,24 @@ module.exports = (req, res) => {
     res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
 
+  // Emit diagnostics immediately
   send({ connecting: url, topic });
 
-  const client = mqtt.connect(url, opts);
+  let client;
+  try {
+    client = mqtt.connect(url, opts);
+  } catch (e) {
+    send({ error: `client create: ${e?.message || String(e)}` }, "diag");
+    return;
+  }
 
-  // keep proxies from closing idle connections
+  // Keep connection from idling out at proxies
   const ka = setInterval(() => res.write(`: ping ${Date.now()}\n\n`), 25000);
 
   client.on("connect", () => {
     send({ connected: url });
     client.subscribe(topic, { qos: 0 }, (err) => {
-      if (err) send({ error: `subscribe: ${String(err)}` }, "error");
+      if (err) send({ error: `subscribe: ${String(err)}` }, "diag");
       else send({ subscribed: topic });
     });
   });
@@ -68,18 +67,18 @@ module.exports = (req, res) => {
   });
 
   client.on("error", (e) => {
-    send({ error: e?.message || String(e) }, "error");
+    send({ error: e?.message || String(e) }, "diag");
   });
 
   client.on("close", () => {
-    send({ info: "mqtt close" }, "info");
+    send({ info: "mqtt close" }, "diag");
   });
 
-  // cleanup when browser disconnects
   req.on("close", () => {
     clearInterval(ka);
-    try { client.end(true); } catch {}
+    try { client && client.end(true); } catch {}
     try { res.end(); } catch {}
   });
 };
+
 
