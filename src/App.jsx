@@ -287,77 +287,104 @@ export default function App() {
   }, 1000);
 
   const startTrack = async () => {
-    setPoints([]); setDistance(0); setStartAt(Date.now()); setElapsed(0); setTracking(true);
-    setShareCode(null); setTrackId(null); setSummary(null);
+  setPoints([]); setDistance(0); setStartAt(Date.now()); setElapsed(0);
+  setTracking(true); setSummary(null); setTrackId(null); setShareCode(null);
+
+  try {
+    const r = await fetch("/api/tracks/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deviceId: (conn.topic.split("/")[1] || "unknown"),
+        topic: conn.topic,
+        startedAt: new Date().toISOString(),
+      }),
+    }).then(res => res.json());
+    if (r?.id) { setTrackId(r.id); setShareCode(r.shareCode); }
+  } catch (e) {
+    console.warn("tracks/create failed:", e);
+  }
+};
+
+  const stopTrack = async () => {
+  setTracking(false);
+
+  const dist = pathDistance(points);                 // recompute
+  const durMs = startAt ? Date.now() - startAt : 0;
+  const center = points.length ? points[Math.floor(points.length / 2)] : last;
+
+  let weather = null, elevationStats = null;
+  try {
+    if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
+      const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then(r=>r.json());
+      weather = w?.current_weather || null;
+    }
+  } catch {}
+  try {
+    if (points.length) {
+      const sample = points.filter((_, i) => i % Math.max(1, Math.floor(points.length / 100)) === 0);
+      const locs = sample.map(p => `${p.lat},${p.lon}`).join("|");
+      const e = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`).then(r=>r.json());
+      const els = e?.results?.map(r => r.elevation).filter(Number.isFinite) || [];
+      if (els.length) {
+        let gain=0, loss=0;
+        for (let i=1;i<els.length;i++) { const d = els[i]-els[i-1]; if (d>0) gain+=d; else loss+=Math.abs(d); }
+        elevationStats = { gain, loss };
+      }
+    }
+  } catch {}
+
+  setDistance(dist);
+  setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
+
+  // persist
+  if (trackId) {
     try {
-      const r = await fetch("/api/tracks/create", {
+      const r = await fetch("/api/tracks/finish", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          deviceId: conn.topic.split("/")[1] || "unknown",
-          topic: conn.topic,
-          startedAt: new Date().toISOString(),
+          id: trackId,
+          endedAt: new Date().toISOString(),
+          distance_m: dist,
+          duration_ms: durMs,
+          weather,
+          elevation: elevationStats,
+          points,
         }),
-      }).then((r) => r.json());
-      if (r?.id) { setTrackId(r.id); setShareCode(r.shareCode); }
-    } catch {
-      // non-fatal; you can still track locally
+      }).then(res => res.json());
+      if (r?.shareCode) setShareCode(r.shareCode);
+    } catch (e) {
+      console.warn("tracks/finish failed:", e);
     }
-  };
-
-  const stopTrack = async () => {
-    setTracking(false);
-    const dist = pathDistance(points);                      // authoritative recompute
-    const durMs = startAt ? Date.now() - startAt : 0;
-    const center = points.length ? points[Math.floor(points.length / 2)] : last;
-
-    let weather = null, elevationStats = null;
-    try {
-      if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
-        const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then((r) => r.json());
-        weather = w?.current_weather || null;
-      }
-    } catch {}
-    try {
-      if (points.length) {
-        const sample = points.filter((_, i) => i % Math.max(1, Math.floor(points.length / 100)) === 0);
-        const locs = sample.map((p) => `${p.lat},${p.lon}`).join("|");
-        const e = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`).then((r) => r.json());
-        const els = e?.results?.map((r) => r.elevation).filter(Number.isFinite) || [];
-        if (els.length) {
-          let gain = 0, loss = 0;
-          for (let i = 1; i < els.length; i++) {
-            const d = els[i] - els[i - 1];
-            if (d > 0) gain += d; else loss += Math.abs(d);
-          }
-          elevationStats = { gain, loss };
-        }
-      }
-    } catch {}
+  }
+};
 
     setDistance(dist);
-    setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
+  setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
 
-    // Persist
+  // persist
+  if (trackId) {
     try {
-      if (trackId) {
-        const r = await fetch("/api/tracks/finish", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            id: trackId,
-            endedAt: new Date().toISOString(),
-            distance_m: dist,
-            duration_ms: durMs,
-            weather,
-            elevation: elevationStats,
-            points,
-          }),
-        }).then((r) => r.json());
-        if (r?.shareCode) setShareCode(r.shareCode);
-      }
-    } catch {}
-  };
+      const r = await fetch("/api/tracks/finish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: trackId,
+          endedAt: new Date().toISOString(),
+          distance_m: dist,
+          duration_ms: durMs,
+          weather,
+          elevation: elevationStats,
+          points,
+        }),
+      }).then(res => res.json());
+      if (r?.shareCode) setShareCode(r.shareCode);
+    } catch (e) {
+      console.warn("tracks/finish failed:", e);
+    }
+  }
+};
 
   const downloadSummary = () => {
     if (!summary) return;
@@ -375,6 +402,7 @@ export default function App() {
     const a = document.createElement("a");
     a.href = url; a.download = `k9_track_${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
     a.click(); URL.revokeObjectURL(url);
+    
   };
 
   // Load saved/shared track (by id or share code)
