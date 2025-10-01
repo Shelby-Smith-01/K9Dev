@@ -2,8 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
+import { toPng } from "html-to-image";
 
-/* ---------------- Utilities ---------------- */
+/* ---------- Utilities ---------- */
 const haversine = (a, b) => {
   if (!a || !b) return 0;
   const R = 6371000;
@@ -38,19 +39,19 @@ function useInterval(cb, delay) {
   }, [delay]);
 }
 
-/* ---------------- Connection defaults ---------------- */
+/* ---------- Default connection (SSE backend speaks raw MQTT) ---------- */
 const defaultConn = {
   host: "broker.emqx.io",
-  port: 1883,        // SSE backend talks to raw MQTT TCP
-  ssl: false,        // set true to use 8883
+  port: 1883,            // 1883 for plain, 8883 when ssl=true
+  ssl: false,
   topic: "devices/esp-shelby-01/telemetry",
-  useSSE: true       // must be true on restricted networks
+  useSSE: true           // keep this ON for reliability behind HTTPS
 };
 
-/* ---------------- Connection Panel ---------------- */
+/* ---------- Connection Panel ---------- */
 function ConnectionPanel({
   conn, setConn, onConnect, onDisconnect,
-  status, msgs, errorMsg, lastPayload, crumbs
+  status, msgs, errorMsg, lastPayload, crumbs, apiDiag
 }) {
   return (
     <div style={{
@@ -133,11 +134,17 @@ function ConnectionPanel({
       <div style={{ marginTop: 8, fontSize: 12, color: "#334155" }}>
         <b>Crumbs this session:</b> {crumbs}
       </div>
+
+      {!!apiDiag && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "#334155", wordBreak: "break-word" }}>
+          <b>API:</b> {apiDiag}
+        </div>
+      )}
     </div>
   );
 }
 
-/* ---------------- SSE hook (fresh callback, robust diag) ---------------- */
+/* ---------- SSE hook (fresh callback to avoid stale-closure) ---------- */
 function useMQTT_SSE(conn, onMessage) {
   const [status, setStatus] = useState("idle");
   const [msgs, setMsgs] = useState(0);
@@ -145,7 +152,7 @@ function useMQTT_SSE(conn, onMessage) {
   const [lastPayload, setLastPayload] = useState("");
   const esRef = useRef(null);
 
-  // keep latest callback (fixes stale-closure when tracking flips to true)
+  // keep latest callback
   const onMessageRef = useRef(onMessage);
   useEffect(() => { onMessageRef.current = onMessage; }, [onMessage]);
 
@@ -164,9 +171,7 @@ function useMQTT_SSE(conn, onMessage) {
     }
 
     const p = Number(conn.port) || (conn.ssl ? 8883 : 1883);
-    const url =
-      `/api/stream?host=${encodeURIComponent(conn.host)}&port=${p}` +
-      `&topic=${encodeURIComponent(conn.topic)}&ssl=${conn.ssl ? "1" : "0"}`;
+    const url = `/api/stream?host=${encodeURIComponent(conn.host)}&port=${p}&topic=${encodeURIComponent(conn.topic)}&ssl=${conn.ssl ? "1" : "0"}`;
 
     setErrorMsg((m) => `Connecting via SSE: ${url}`);
 
@@ -226,7 +231,7 @@ function useMQTT_SSE(conn, onMessage) {
   return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
-/* ---------------- Map helper ---------------- */
+/* ---------- Map helper ---------- */
 function Recenter({ lat, lon }) {
   const map = useMap();
   useEffect(() => {
@@ -235,7 +240,7 @@ function Recenter({ lat, lon }) {
   return null;
 }
 
-/* ---------------- Main App ---------------- */
+/* ---------- Main App ---------- */
 export default function App() {
   const [tab, setTab] = useState("live");     // 'live' | 'k9'
   const [panelOpen, setPanelOpen] = useState(true);
@@ -252,10 +257,13 @@ export default function App() {
   const [summary, setSummary] = useState(null);
   const [trackId, setTrackId] = useState(null);
   const [shareCode, setShareCode] = useState(null);
+  const [apiDiag, setApiDiag] = useState("");
+
+  const mapRootRef = useRef(null);
 
   const MIN_STEP_M = 2; // ignore GPS jitter < 2 m
 
-  // derive distance from full breadcrumb path (no drift)
+  // derive distance from full breadcrumb path
   const distance = useMemo(() => {
     if (!points || points.length < 2) return 0;
     let sum = 0;
@@ -283,6 +291,24 @@ export default function App() {
   // K9 elapsed timer
   useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
 
+  async function captureAndUploadSnapshot(id) {
+    try {
+      const node = mapRootRef.current;
+      if (!node || !id) return null;
+      const dataUrl = await toPng(node, { cacheBust: true, pixelRatio: 2 });
+      const resp = await fetch("/api/tracks/uploadSnapshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, dataUrl })
+      }).then((r) => r.json());
+      if (resp?.url) return resp.url;
+      return null;
+    } catch (e) {
+      console.warn("snapshot failed", e);
+      return null;
+    }
+  }
+
   const startTrack = async () => {
     setSummary(null);
     setTrackId(null);
@@ -290,6 +316,7 @@ export default function App() {
     setStartAt(Date.now());
     setElapsed(0);
     setTracking(true);
+    setApiDiag("");
 
     // seed first crumb if we already have a fix
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) {
@@ -309,8 +336,10 @@ export default function App() {
           startedAt: new Date().toISOString(),
         }),
       }).then((res) => res.json());
+      setApiDiag(JSON.stringify(r));
       if (r?.id) { setTrackId(r.id); setShareCode(r.shareCode); }
     } catch (e) {
+      setApiDiag(`create error: ${String(e)}`);
       console.warn("tracks/create failed:", e);
     }
   };
@@ -353,6 +382,13 @@ export default function App() {
 
     setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
 
+    // capture map snapshot (best-effort)
+    let snapshotUrl = null;
+    if (trackId) {
+      snapshotUrl = await captureAndUploadSnapshot(trackId);
+      if (snapshotUrl) setSummary((s) => (s ? { ...s, snapshotUrl } : s));
+    }
+
     // persist finish
     if (trackId) {
       try {
@@ -369,8 +405,10 @@ export default function App() {
             points,
           }),
         }).then((res) => res.json());
+        setApiDiag((d) => `${d}\nfinish: ${JSON.stringify(r)}`);
         if (r?.shareCode) setShareCode(r.shareCode);
       } catch (e) {
+        setApiDiag((d) => `${d}\nfinish error: ${String(e)}`);
         console.warn("tracks/finish failed:", e);
       }
     }
@@ -383,6 +421,7 @@ export default function App() {
     setElapsed(0);
     setTrackId(null);
     setShareCode(null);
+    setApiDiag("");
   };
 
   const downloadSummary = () => {
@@ -397,6 +436,7 @@ export default function App() {
         elevation: summary.elevation,
         samples: summary.points.length,
         path: summary.points,
+        snapshot_url: summary.snapshotUrl || null,
       }, null, 2)],
       { type: "application/json" }
     );
@@ -448,7 +488,7 @@ export default function App() {
         {panelOpen ? "Hide" : "Connect"}
       </button>
 
-      {/* Connection + Info cards (portal so the map never covers them) */}
+      {/* Connection + Info cards (portal to avoid map overlap) */}
       {panelOpen && createPortal(
         <div id="conn-panel" style={{ position: "fixed", top: 16, left: 16, zIndex: 2147483647 }}>
           <ConnectionPanel
@@ -461,6 +501,7 @@ export default function App() {
             errorMsg={errorMsg}
             lastPayload={lastPayload}
             crumbs={points.length}
+            apiDiag={apiDiag}
           />
 
           {last && (
@@ -512,10 +553,16 @@ export default function App() {
               {summary && (
                 <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
                   <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
-                  <div>Distance: {prettyDistance(summary.distance)}</div>
-                  <div>Duration: {prettyDuration(summary.durationMs)}</div>
+                  <div>Distance: {prettyDistance(summary.distance ?? distance)}</div>
+                  <div>Duration: {prettyDuration(summary.durationMs ?? elapsed)}</div>
                   <div>Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}</div>
                   <div>Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}</div>
+                  {summary.snapshotUrl && (
+                    <div style={{ marginTop: 8 }}>
+                      <div style={{ fontWeight: 600 }}>Snapshot</div>
+                      <img src={summary.snapshotUrl} alt="Track snapshot" style={{ maxWidth: 380, borderRadius: 8 }} />
+                    </div>
+                  )}
                   <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
                     <button onClick={downloadSummary}
                             style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>
@@ -536,8 +583,8 @@ export default function App() {
         document.body
       )}
 
-      {/* Map */}
-      <div style={{ height: "100%" }}>
+      {/* Map (wrapped in ref for snapshots) */}
+      <div ref={mapRootRef} style={{ height: "100%" }}>
         <MapContainer center={center} zoom={14} style={{ height: "100%", width: "100%" }}>
           <TileLayer
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -558,3 +605,4 @@ export default function App() {
     </div>
   );
 }
+
