@@ -1,13 +1,22 @@
-const { getSupabase } = require('./_supabase');
+exports.config = { runtime: "nodejs" };
 
-module.exports = async (req, res) => {
+const { getSupabase } = require("./_supabase");
+
+module.exports = async (_req, res) => {
+  res.setHeader("Content-Type", "application/json");
   try {
-    const supabase = await getSupabase();
-    const { data, error } = await supabase.from('tracks').select('count').limit(1);
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ ok: true, tableAccessible: !error, error: error?.message || null }));
+    // Check env + connectivity
+    const supabase = getSupabase();
+    const { error } = await supabase.from("tracks").select("id").limit(1);
+    if (error) {
+      console.error("tracks/ping error:", error);
+      res.statusCode = 200;
+      return res.end(JSON.stringify({ ok: false, error: error.message }));
+    }
+    return res.end(JSON.stringify({ ok: true, tableAccessible: true }));
   } catch (e) {
+    console.error("tracks/ping exception:", e);
     res.statusCode = 500;
-    res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+    return res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
   }
 };
