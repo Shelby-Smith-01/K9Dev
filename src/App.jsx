@@ -58,13 +58,13 @@ function useInterval(cb, delay) {
 /* ---------- Default connection (SSE backend talks to MQTT) ---------- */
 const defaultConn = {
   host: "broker.emqx.io",
-  port: 1883,            // 1883 for plain TCP, 8883 for TLS when ssl=true
+  port: 1883,            // 1883 for TCP, 8883 for TLS when ssl=true
   ssl: false,
   topic: "devices/esp-shelby-01/telemetry",
-  useSSE: true           // use the /api/stream proxy (recommended)
+  useSSE: true           // use /api/stream proxy
 };
 
-/* ---------- Connection Panel ---------- */
+/* ---------- Connection Panel (hidden in viewer mode) ---------- */
 function ConnectionPanel({
   conn, setConn, onConnect, onDisconnect,
   status, msgs, errorMsg, lastPayload, crumbs, apiDiag
@@ -257,8 +257,14 @@ function Recenter({ lat, lon }) {
 
 /* ---------- Main App ---------- */
 export default function App() {
-  const [tab, setTab] = useState("live");     // 'live' | 'k9'
-  const [panelOpen, setPanelOpen] = useState(true);
+  // Viewer mode detection
+  const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams("");
+  const viewerViaFlag = params.get("viewer") === "1";
+  const shareCodeParam = params.get("share");
+  const isViewer = viewerViaFlag || !!shareCodeParam;
+
+  const [tab, setTab] = useState(isViewer ? "k9" : "live");  // viewer sees K9 track view
+  const [panelOpen, setPanelOpen] = useState(!isViewer);     // hide sidebar in viewer mode
   const [conn, setConn] = useState(defaultConn);
 
   const [last, setLast] = useState(null);     // {lat, lon, fix, sats, raw}
@@ -277,9 +283,9 @@ export default function App() {
   const mapRootRef = useRef(null);
   const mapRef = useRef(null);
 
-  const MIN_STEP_M = 2; // ignore GPS jitter < 2 m
+  const MIN_STEP_M = 2;
 
-  // derive distance from full breadcrumb path
+  // Derived distance
   const distance = useMemo(() => {
     if (!points || points.length < 2) return 0;
     let sum = 0;
@@ -287,38 +293,99 @@ export default function App() {
     return sum;
   }, [points]);
 
+  // SSE connection
   const { status, msgs, errorMsg, lastPayload, connect, disconnect } =
     useMQTT_SSE(conn, (msg) => {
       if (!Number.isFinite(msg.lat) || !Number.isFinite(msg.lon)) return;
       setLast(msg);
 
-      if (!tracking) return;
-      if (autoBreadcrumbFixOnly && !msg.fix) return;
-
-      setPoints((prev) => {
-        const p = { lat: msg.lat, lon: msg.lon, ts: Date.now() };
-        if (prev.length === 0) return [p];
-        const moved = haversine(prev[prev.length - 1], p);
-        return moved >= MIN_STEP_M ? [...prev, p] : prev;
-      });
+      // Always breadcrumb in viewer mode (fix gate optional)
+      if (isViewer || tracking) {
+        if (!autoBreadcrumbFixOnly || msg.fix) {
+          setPoints((prev) => {
+            const p = { lat: msg.lat, lon: msg.lon, ts: Date.now() };
+            if (prev.length === 0) return [p];
+            const moved = haversine(prev[prev.length - 1], p);
+            return moved >= MIN_STEP_M ? [...prev, p] : prev;
+          });
+        }
+      }
     });
 
-  // K9 elapsed timer
-  useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
+  // Elapsed timer (viewer shows live duration since first point)
+  useInterval(() => {
+    if (isViewer) {
+      if (!startAt && points.length > 0) setStartAt(points[0].ts);
+      if (startAt) setElapsed(Date.now() - startAt);
+    } else if (tracking && startAt) {
+      setElapsed(Date.now() - startAt);
+    }
+  }, 1000);
 
-  // LocalStorage: remember connection settings
+  // Load/save connection (non-viewer only)
   useEffect(() => {
+    if (isViewer) return;
     try {
       const raw = localStorage.getItem("k9-conn");
       if (raw) setConn(JSON.parse(raw));
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  useEffect(() => {
-    try { localStorage.setItem("k9-conn", JSON.stringify(conn)); } catch {}
-  }, [conn]);
+  }, [isViewer]);
 
-  // Helpers for snapshot
+  useEffect(() => {
+    if (isViewer) return;
+    try { localStorage.setItem("k9-conn", JSON.stringify(conn)); } catch {}
+  }, [conn, isViewer]);
+
+  // Viewer: allow URL overrides: host/port/ssl/topic
+  useEffect(() => {
+    if (!isViewer) return;
+    const h = params.get("host");
+    const port = params.get("port");
+    const ssl = params.get("ssl");
+    const topic = params.get("topic");
+    setConn((c) => ({
+      ...c,
+      host: h || c.host,
+      port: port ? Number(port) : c.port,
+      ssl: ssl === "1" ? true : ssl === "0" ? false : c.ssl,
+      topic: topic || c.topic,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isViewer]);
+
+  // Viewer: resolve share code -> topic (from Supabase)
+  useEffect(() => {
+    if (!shareCodeParam) return;
+    (async () => {
+      try {
+        const r = await fetch(`/api/tracks/byShare?code=${encodeURIComponent(shareCodeParam)}`).then((res) => res.json());
+        if (r?.topic) {
+          setConn((c) => ({
+            ...c,
+            topic: r.topic,
+            host: r.host || c.host,
+            port: r.port || c.port,
+            ssl: typeof r.ssl === "boolean" ? r.ssl : c.ssl,
+          }));
+        }
+      } catch (e) {
+        console.warn("byShare fetch failed", e);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareCodeParam]);
+
+  // Viewer: auto-connect once conn is ready
+  useEffect(() => {
+    if (!isViewer) return;
+    // basic readiness: have host/port/topic
+    if (!conn.host || !conn.port || !conn.topic) return;
+    connect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isViewer, conn.host, conn.port, conn.topic, conn.ssl]);
+
+  /* -------- Snapshot helpers -------- */
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
   function fitTrackBounds(map, pts, pad = 0.12) {
@@ -343,27 +410,19 @@ export default function App() {
       const map = mapRef.current;
       if (!node || !map || !id) return null;
 
-      // remember current view
       const prev = { center: map.getCenter(), zoom: map.getZoom() };
-
-      // fit to route so the whole polyline is visible
       fitTrackBounds(map, points, 0.12);
       await nextFrame();
       await wait(200);
 
-      // capture 2x for crispness
       const dataUrl = await toPng(node, { cacheBust: true, pixelRatio: 2 });
-
-      // restore previous view (no animation)
       map.setView(prev.center, prev.zoom, { animate: false });
 
-      // upload to Supabase via your API
       const resp = await fetch("/api/tracks/uploadSnapshot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, dataUrl })
       }).then((r) => r.json());
-
       return resp?.url || null;
     } catch (e) {
       console.warn("snapshot failed", e);
@@ -371,6 +430,7 @@ export default function App() {
     }
   }
 
+  /* -------- K9 controls (hidden in viewer) -------- */
   const startTrack = async () => {
     setSummary(null);
     setTrackId(null);
@@ -380,14 +440,12 @@ export default function App() {
     setTracking(true);
     setApiDiag("");
 
-    // seed first crumb if we already have a fix
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) {
       setPoints([{ lat: last.lat, lon: last.lon, ts: Date.now() }]);
     } else {
       setPoints([]);
     }
 
-    // create row in Supabase (best-effort)
     try {
       const r = await fetch("/api/tracks/create", {
         method: "POST",
@@ -409,11 +467,10 @@ export default function App() {
   const stopTrack = async () => {
     setTracking(false);
 
-    const dist = distance; // derived from points
+    const dist = distance;
     const durMs = startAt ? Date.now() - startAt : 0;
     const center = points.length ? points[Math.floor(points.length / 2)] : last;
 
-    // simple weather + elevation (best-effort)
     let weather = null, elevationStats = null;
     try {
       if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
@@ -442,7 +499,6 @@ export default function App() {
       }
     } catch {}
 
-    // include derived pace & avg speed in summary
     const pace = paceStr(dist, durMs);
     const speed = speedStr(dist, durMs);
 
@@ -456,14 +512,12 @@ export default function App() {
       avgSpeedKmh: speed
     });
 
-    // capture map snapshot (best-effort)
     let snapshotUrl = null;
     if (trackId) {
       snapshotUrl = await captureAndUploadSnapshot(trackId);
       if (snapshotUrl) setSummary((s) => (s ? { ...s, snapshotUrl } : s));
     }
 
-    // persist finish
     if (trackId) {
       try {
         const r = await fetch("/api/tracks/finish", {
@@ -527,7 +581,6 @@ export default function App() {
     return [30, -97];
   }, [last]);
 
-  // live computed values for overlay during active tracking
   const liveDistance = summary?.distance ?? distance;
   const liveDuration = summary?.durationMs ?? elapsed;
   const livePace = summary?.paceMinPerKm ?? paceStr(liveDistance, liveDuration);
@@ -540,33 +593,43 @@ export default function App() {
         padding: 12, display: "flex", alignItems: "center", gap: 8,
         borderBottom: "1px solid #e5e7eb", background: "#fff", zIndex: 10
       }}>
-        <button
-          onClick={() => setPanelOpen(o => !o)}
-          title={panelOpen ? "Hide sidebar" : "Show sidebar"}
-          style={{
-            padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff",
-            border: "none", boxShadow: "0 4px 12px rgba(0,0,0,.12)"
-          }}
-        >
-          {panelOpen ? "☰ Hide" : "☰ Show"}
-        </button>
-
-        <div style={{ fontSize: 18, fontWeight: 600, marginLeft: 8 }}>K9 Live Tracker</div>
-
-        <div style={{ marginLeft: 16, display: "flex", gap: 6, background: "#f1f5f9", borderRadius: 14, padding: 6 }}>
-          <button onClick={() => setTab("live")}
-                  style={{ padding: "6px 10px", borderRadius: 10,
-                           background: tab === "live" ? "#fff" : "transparent",
-                           boxShadow: tab === "live" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}>
-            Live Map
+        {!isViewer && (
+          <button
+            onClick={() => setPanelOpen(o => !o)}
+            title={panelOpen ? "Hide sidebar" : "Show sidebar"}
+            style={{
+              padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff",
+              border: "none", boxShadow: "0 4px 12px rgba(0,0,0,.12)"
+            }}
+          >
+            {panelOpen ? "☰ Hide" : "☰ Show"}
           </button>
-          <button onClick={() => setTab("k9")}
-                  style={{ padding: "6px 10px", borderRadius: 10,
-                           background: tab === "k9" ? "#fff" : "transparent",
-                           boxShadow: tab === "k9" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}>
-            K9 Track
-          </button>
+        )}
+
+        <div style={{ fontSize: 18, fontWeight: 600, marginLeft: 8 }}>
+          K9 Live Tracker {isViewer && <span style={{
+            marginLeft: 8, fontSize: 12, fontWeight: 700,
+            color: "#1f2937", background: "#fde68a", border: "1px solid #f59e0b",
+            borderRadius: 8, padding: "2px 6px"
+          }}>VIEW ONLY</span>}
         </div>
+
+        {!isViewer && (
+          <div style={{ marginLeft: 16, display: "flex", gap: 6, background: "#f1f5f9", borderRadius: 14, padding: 6 }}>
+            <button onClick={() => setTab("live")}
+                    style={{ padding: "6px 10px", borderRadius: 10,
+                             background: tab === "live" ? "#fff" : "transparent",
+                             boxShadow: tab === "live" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}>
+              Live Map
+            </button>
+            <button onClick={() => setTab("k9")}
+                    style={{ padding: "6px 10px", borderRadius: 10,
+                             background: tab === "k9" ? "#fff" : "transparent",
+                             boxShadow: tab === "k9" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}>
+              K9 Track
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Content: Sidebar + Map */}
@@ -576,7 +639,7 @@ export default function App() {
         transition: "grid-template-columns .25s ease",
         minHeight: 0
       }}>
-        {/* Sidebar */}
+        {/* Sidebar (hidden in viewer) */}
         <aside style={{
           overflowY: "auto",
           background: "#ffffff",
@@ -585,112 +648,80 @@ export default function App() {
           opacity: panelOpen ? 1 : 0,
           transition: "opacity .2s ease"
         }}>
-          <ConnectionPanel
-            conn={conn}
-            setConn={setConn}
-            onConnect={connect}
-            onDisconnect={disconnect}
-            status={status}
-            msgs={msgs}
-            errorMsg={errorMsg}
-            lastPayload={lastPayload}
-            crumbs={points.length}
-            apiDiag={apiDiag}
-          />
+          {!isViewer && (
+            <>
+              <ConnectionPanel
+                conn={conn}
+                setConn={setConn}
+                onConnect={connect}
+                onDisconnect={disconnect}
+                status={status}
+                msgs={msgs}
+                errorMsg={errorMsg}
+                lastPayload={lastPayload}
+                crumbs={points.length}
+                apiDiag={apiDiag}
+              />
 
-          {last && (
-            <div style={{
-              marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)",
-              border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)",
-              fontSize: 12
-            }}>
-              <div style={{ fontWeight: 600 }}>Last fix</div>
-              <div>lat: {Number.isFinite(last.lat) ? last.lat.toFixed(6) : "—"}
-                  &nbsp; lon: {Number.isFinite(last.lon) ? last.lon.toFixed(6) : "—"}</div>
-              <div>fix: {String(last.fix)} &nbsp; sats: {Number.isFinite(last.sats) ? last.sats : "—"}</div>
-              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={recenterOnUpdate}
-                  onChange={(e) => setRecenterOnUpdate(e.target.checked)}
-                />
-                Recenter on update
-              </label>
-            </div>
-          )}
-
-          {tab === "k9" && (
-            <div style={{
-              marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)",
-              border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)",
-              fontSize: 12
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>K9 Track Controls</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                {!tracking ? (
-                  <button onClick={startTrack}
-                          style={{ padding: "6px 10px", borderRadius: 10, background: "#16a34a", color: "#fff" }}>
-                    Start
-                  </button>
-                ) : (
-                  <button onClick={stopTrack}
-                          style={{ padding: "6px 10px", borderRadius: 10, background: "#dc2626", color: "#fff" }}>
-                    Stop
-                  </button>
-                )}
-                <button onClick={clearTrack} style={{ padding: "6px 10px", borderRadius: 10 }}>Clear</button>
-              </div>
-
-              <div style={{ marginTop: 6 }}>Time: {prettyDuration(elapsed)}</div>
-              <div>Distance: {prettyDistance(distance)}</div>
-              <div>Pace: {paceStr(distance, elapsed)}</div>
-              <div>Avg speed: {speedStr(distance, elapsed)}</div>
-
-              <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={autoBreadcrumbFixOnly}
-                  onChange={(e) => setAutoBreadcrumbFixOnly(e.target.checked)}
-                />
-                Only add crumbs when fix=true
-              </label>
-
-              {summary && (
-                <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
-                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
-                  <div>Distance: {prettyDistance(summary.distance ?? distance)}</div>
-                  <div>Duration: {prettyDuration(summary.durationMs ?? elapsed)}</div>
-                  <div>Pace: {summary.paceMinPerKm ?? livePace}</div>
-                  <div>Avg speed: {summary.avgSpeedKmh ?? liveSpeed}</div>
-                  <div>
-                    Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
-                  </div>
-                  <div>
-                    Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
-                  </div>
-                  {summary.snapshotUrl && (
-                    <div style={{ marginTop: 8 }}>
-                      <div style={{ fontWeight: 600 }}>Snapshot</div>
-                      <img src={summary.snapshotUrl} alt="Track snapshot" style={{ maxWidth: 320, borderRadius: 8 }} />
-                    </div>
-                  )}
-                  <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
-                    <button
-                      onClick={downloadSummary}
-                      style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}
-                    >
-                      Download JSON
-                    </button>
-                    {shareCode && (
-                      <a href={`?share=${encodeURIComponent(shareCode)}`}
-                         style={{ fontSize: 12, color: "#2563eb", textDecoration: "underline" }}>
-                        Share link
-                      </a>
-                    )}
-                  </div>
+              {last && (
+                <div style={{
+                  marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)",
+                  border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)",
+                  fontSize: 12
+                }}>
+                  <div style={{ fontWeight: 600 }}>Last fix</div>
+                  <div>lat: {Number.isFinite(last.lat) ? last.lat.toFixed(6) : "—"}
+                      &nbsp; lon: {Number.isFinite(last.lon) ? last.lon.toFixed(6) : "—"}</div>
+                  <div>fix: {String(last.fix)} &nbsp; sats: {Number.isFinite(last.sats) ? last.sats : "—"}</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={recenterOnUpdate}
+                      onChange={(e) => setRecenterOnUpdate(e.target.checked)}
+                    />
+                    Recenter on update
+                  </label>
                 </div>
               )}
-            </div>
+
+              {tab === "k9" && (
+                <div style={{
+                  marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)",
+                  border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)",
+                  fontSize: 12
+                }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>K9 Track Controls</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {!tracking ? (
+                      <button onClick={startTrack}
+                              style={{ padding: "6px 10px", borderRadius: 10, background: "#16a34a", color: "#fff" }}>
+                        Start
+                      </button>
+                    ) : (
+                      <button onClick={stopTrack}
+                              style={{ padding: "6px 10px", borderRadius: 10, background: "#dc2626", color: "#fff" }}>
+                        Stop
+                      </button>
+                    )}
+                    <button onClick={clearTrack} style={{ padding: "6px 10px", borderRadius: 10 }}>Clear</button>
+                  </div>
+
+                  <div style={{ marginTop: 6 }}>Time: {prettyDuration(elapsed)}</div>
+                  <div>Distance: {prettyDistance(distance)}</div>
+                  <div>Pace: {paceStr(distance, elapsed)}</div>
+                  <div>Avg speed: {speedStr(distance, elapsed)}</div>
+
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={autoBreadcrumbFixOnly}
+                      onChange={(e) => setAutoBreadcrumbFixOnly(e.target.checked)}
+                    />
+                    Only add crumbs when fix=true
+                  </label>
+                </div>
+              )}
+            </>
           )}
         </aside>
 
@@ -706,10 +737,10 @@ export default function App() {
             <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Track Summary</div>
             <div style={{ fontSize: 12, lineHeight: 1.5 }}>
               <div><b>Device:</b> {(conn.topic.split("/")[1] || "unknown")}</div>
-              <div><b>Distance:</b> {prettyDistance(liveDistance)}</div>
-              <div><b>Duration:</b> {prettyDuration(liveDuration)}</div>
-              <div><b>Pace:</b> {livePace}</div>
-              <div><b>Avg speed:</b> {liveSpeed}</div>
+              <div><b>Distance:</b> {prettyDistance(distance)}</div>
+              <div><b>Duration:</b> {prettyDuration(elapsed)}</div>
+              <div><b>Pace:</b> {paceStr(distance, elapsed)}</div>
+              <div><b>Avg speed:</b> {speedStr(distance, elapsed)}</div>
               {summary?.weather ? (
                 <div><b>Weather:</b> {summary.weather.temperature}°C, wind {summary.weather.windspeed} km/h</div>
               ) : (
@@ -719,7 +750,10 @@ export default function App() {
           </div>
 
           <MapContainer
-            center={center}
+            center={useMemo(() => {
+              if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
+              return [30, -97];
+            }, [last])}
             zoom={14}
             style={{ height: "100%", width: "100%" }}
             whenCreated={(m) => (mapRef.current = m)}
@@ -734,7 +768,7 @@ export default function App() {
             {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
               <CircleMarker center={[last.lat, last.lon]} radius={8} pathOptions={{ color: "#111" }} />
             )}
-            {(tab === "k9" ? points : []).length > 0 && (
+            {points.length > 0 && (
               <Polyline
                 positions={points.map((p) => [p.lat, p.lon])}
                 pathOptions={{ color: "#2563eb", weight: 4, opacity: 0.9 }}
@@ -746,5 +780,6 @@ export default function App() {
     </div>
   );
 }
+
 
 
