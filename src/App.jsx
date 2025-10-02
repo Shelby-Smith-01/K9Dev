@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import { toPng } from "html-to-image";
+import L from "leaflet";
 
 /* ---------- Utilities ---------- */
 const haversine = (a, b) => {
@@ -26,6 +27,22 @@ const prettyDuration = (ms) => {
   const ss = s % 60;
   const pad = (n) => n.toString().padStart(2, "0");
   return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
+};
+
+const paceStr = (distance_m, duration_ms) => {
+  if (!distance_m || !duration_ms) return "—";
+  const minPerKm = (duration_ms / 60000) / (distance_m / 1000);
+  if (!isFinite(minPerKm) || minPerKm <= 0) return "—";
+  const mm = Math.floor(minPerKm);
+  const ss = Math.round((minPerKm - mm) * 60);
+  return `${mm}:${ss.toString().padStart(2, "0")} min/km`;
+};
+
+const speedStr = (distance_m, duration_ms) => {
+  if (!distance_m || !duration_ms) return "—";
+  const kmh = (distance_m / 1000) / (duration_ms / 3600000);
+  if (!isFinite(kmh) || kmh <= 0) return "—";
+  return `${kmh.toFixed(2)} km/h`;
 };
 
 function useInterval(cb, delay) {
@@ -143,7 +160,7 @@ function ConnectionPanel({
   );
 }
 
-/* ---------- SSE hook (keeps fresh callback) ---------- */
+/* ---------- SSE hook ---------- */
 function useMQTT_SSE(conn, onMessage) {
   const [status, setStatus] = useState("idle");
   const [msgs, setMsgs] = useState(0);
@@ -258,6 +275,7 @@ export default function App() {
   const [apiDiag, setApiDiag] = useState("");
 
   const mapRootRef = useRef(null);
+  const mapRef = useRef(null);
 
   const MIN_STEP_M = 2; // ignore GPS jitter < 2 m
 
@@ -288,18 +306,65 @@ export default function App() {
   // K9 elapsed timer
   useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
 
+  // LocalStorage: remember connection settings
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("k9-conn");
+      if (raw) setConn(JSON.parse(raw));
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("k9-conn", JSON.stringify(conn)); } catch {}
+  }, [conn]);
+
+  // Helpers for snapshot
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+  function fitTrackBounds(map, pts, pad = 0.12) {
+    if (!map) return;
+    if (!pts || pts.length === 0) {
+      if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) {
+        map.setView([last.lat, last.lon], 15, { animate: false });
+      }
+      return;
+    }
+    if (pts.length === 1) {
+      map.setView([pts[0].lat, pts[0].lon], 16, { animate: false });
+      return;
+    }
+    const bounds = L.latLngBounds(pts.map((p) => [p.lat, p.lon]));
+    map.fitBounds(bounds.pad(pad), { animate: false });
+  }
+
   async function captureAndUploadSnapshot(id) {
     try {
       const node = mapRootRef.current;
-      if (!node || !id) return null;
+      const map = mapRef.current;
+      if (!node || !map || !id) return null;
+
+      // remember current view
+      const prev = { center: map.getCenter(), zoom: map.getZoom() };
+
+      // fit to route so the whole polyline is visible
+      fitTrackBounds(map, points, 0.12);
+      await nextFrame();
+      await wait(200);
+
+      // capture 2x for crispness
       const dataUrl = await toPng(node, { cacheBust: true, pixelRatio: 2 });
+
+      // restore previous view (no animation)
+      map.setView(prev.center, prev.zoom, { animate: false });
+
+      // upload to Supabase via your API
       const resp = await fetch("/api/tracks/uploadSnapshot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, dataUrl })
       }).then((r) => r.json());
-      if (resp?.url) return resp.url;
-      return null;
+
+      return resp?.url || null;
     } catch (e) {
       console.warn("snapshot failed", e);
       return null;
@@ -344,7 +409,7 @@ export default function App() {
   const stopTrack = async () => {
     setTracking(false);
 
-    const dist = distance; // derived
+    const dist = distance; // derived from points
     const durMs = startAt ? Date.now() - startAt : 0;
     const center = points.length ? points[Math.floor(points.length / 2)] : last;
 
@@ -377,7 +442,19 @@ export default function App() {
       }
     } catch {}
 
-    setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points });
+    // include derived pace & avg speed in summary
+    const pace = paceStr(dist, durMs);
+    const speed = speedStr(dist, durMs);
+
+    setSummary({
+      distance: dist,
+      durationMs: durMs,
+      weather,
+      elevation: elevationStats,
+      points,
+      paceMinPerKm: pace,
+      avgSpeedKmh: speed
+    });
 
     // capture map snapshot (best-effort)
     let snapshotUrl = null;
@@ -399,7 +476,7 @@ export default function App() {
             duration_ms: durMs,
             weather,
             elevation: elevationStats,
-            points,
+            points
           }),
         }).then((res) => res.json());
         setApiDiag((d) => `${d}\nfinish: ${JSON.stringify(r)}`);
@@ -429,6 +506,8 @@ export default function App() {
         device: conn.topic,
         distance_m: summary.distance,
         duration_ms: summary.durationMs,
+        pace_min_per_km: summary.paceMinPerKm,
+        avg_speed_kmh: summary.avgSpeedKmh,
         weather: summary.weather,
         elevation: summary.elevation,
         samples: summary.points.length,
@@ -447,6 +526,12 @@ export default function App() {
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
     return [30, -97];
   }, [last]);
+
+  // live computed values for overlay during active tracking
+  const liveDistance = summary?.distance ?? distance;
+  const liveDuration = summary?.durationMs ?? elapsed;
+  const livePace = summary?.paceMinPerKm ?? paceStr(liveDistance, liveDuration);
+  const liveSpeed = summary?.avgSpeedKmh ?? speedStr(liveDistance, liveDuration);
 
   return (
     <div style={{ height: "100vh", width: "100%", background: "#f8fafc", display: "grid", gridTemplateRows: "auto 1fr" }}>
@@ -558,6 +643,9 @@ export default function App() {
 
               <div style={{ marginTop: 6 }}>Time: {prettyDuration(elapsed)}</div>
               <div>Distance: {prettyDistance(distance)}</div>
+              <div>Pace: {paceStr(distance, elapsed)}</div>
+              <div>Avg speed: {speedStr(distance, elapsed)}</div>
+
               <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
                 <input
                   type="checkbox"
@@ -572,6 +660,8 @@ export default function App() {
                   <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
                   <div>Distance: {prettyDistance(summary.distance ?? distance)}</div>
                   <div>Duration: {prettyDuration(summary.durationMs ?? elapsed)}</div>
+                  <div>Pace: {summary.paceMinPerKm ?? livePace}</div>
+                  <div>Avg speed: {summary.avgSpeedKmh ?? liveSpeed}</div>
                   <div>
                     Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
                   </div>
@@ -606,7 +696,34 @@ export default function App() {
 
         {/* Map */}
         <main ref={mapRootRef} style={{ position: "relative", minWidth: 0 }}>
-          <MapContainer center={center} zoom={14} style={{ height: "100%", width: "100%" }}>
+          {/* Overlay included in snapshot */}
+          <div style={{
+            position: "absolute", top: 12, right: 12, zIndex: 400,
+            background: "rgba(255,255,255,0.95)", border: "1px solid #e5e7eb",
+            borderRadius: 12, padding: 10, minWidth: 240,
+            boxShadow: "0 6px 20px rgba(0,0,0,.12)", pointerEvents: "none"
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Track Summary</div>
+            <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+              <div><b>Device:</b> {(conn.topic.split("/")[1] || "unknown")}</div>
+              <div><b>Distance:</b> {prettyDistance(liveDistance)}</div>
+              <div><b>Duration:</b> {prettyDuration(liveDuration)}</div>
+              <div><b>Pace:</b> {livePace}</div>
+              <div><b>Avg speed:</b> {liveSpeed}</div>
+              {summary?.weather ? (
+                <div><b>Weather:</b> {summary.weather.temperature}°C, wind {summary.weather.windspeed} km/h</div>
+              ) : (
+                <div><b>Weather:</b> —</div>
+              )}
+            </div>
+          </div>
+
+          <MapContainer
+            center={center}
+            zoom={14}
+            style={{ height: "100%", width: "100%" }}
+            whenCreated={(m) => (mapRef.current = m)}
+          >
             <TileLayer
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               attribution="&copy; OpenStreetMap"
@@ -629,4 +746,5 @@ export default function App() {
     </div>
   );
 }
+
 
