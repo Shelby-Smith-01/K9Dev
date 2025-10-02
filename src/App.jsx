@@ -13,12 +13,9 @@ const haversine = (a, b) => {
   const dLon = toRad(b.lon - a.lon);
   const lat1 = toRad(a.lat);
   const lat2 = toRad(b.lat);
-  const x =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 };
-
 const prettyDistance = (m) => (m < 1000 ? `${m.toFixed(1)} m` : `${(m / 1000).toFixed(2)} km`);
 const prettyDuration = (ms) => {
   const s = Math.floor(ms / 1000);
@@ -28,7 +25,6 @@ const prettyDuration = (ms) => {
   const pad = (n) => n.toString().padStart(2, "0");
   return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
 };
-
 const paceStr = (distance_m, duration_ms) => {
   if (!distance_m || !duration_ms) return "—";
   const minPerKm = (duration_ms / 60000) / (distance_m / 1000);
@@ -37,14 +33,12 @@ const paceStr = (distance_m, duration_ms) => {
   const ss = Math.round((minPerKm - mm) * 60);
   return `${mm}:${ss.toString().padStart(2, "0")} min/km`;
 };
-
 const speedStr = (distance_m, duration_ms) => {
   if (!distance_m || !duration_ms) return "—";
   const kmh = (distance_m / 1000) / (duration_ms / 3600000);
   if (!isFinite(kmh) || kmh <= 0) return "—";
   return `${kmh.toFixed(2)} km/h`;
 };
-
 function useInterval(cb, delay) {
   const r = useRef(cb);
   useEffect(() => { r.current = cb; }, [cb]);
@@ -263,13 +257,13 @@ export default function App() {
   const shareCodeParam = params.get("share");
   const isViewer = viewerViaFlag || !!shareCodeParam;
 
-  const [tab, setTab] = useState(isViewer ? "k9" : "live");  // viewer sees K9 track view
-  const [panelOpen, setPanelOpen] = useState(!isViewer);     // hide sidebar in viewer mode
+  const [tab, setTab] = useState(isViewer ? "k9" : "live");
+  const [panelOpen, setPanelOpen] = useState(!isViewer);
   const [conn, setConn] = useState(defaultConn);
 
-  const [last, setLast] = useState(null);     // {lat, lon, fix, sats, raw}
-  const [points, setPoints] = useState([]);   // breadcrumbs during K9 track
-  const [tracking, setTracking] = useState(false);
+  const [last, setLast] = useState(null);
+  const [points, setPoints] = useState([]);
+  const [tracking, setTracking] = useState(false);   // operator-only
   const [startAt, setStartAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [autoBreadcrumbFixOnly, setAutoBreadcrumbFixOnly] = useState(true);
@@ -279,6 +273,10 @@ export default function App() {
   const [trackId, setTrackId] = useState(null);
   const [shareCode, setShareCode] = useState(null);
   const [apiDiag, setApiDiag] = useState("");
+
+  // VIEWER: whether a track is active (controls breadcrumbing)
+  const [viewerTrackActive, setViewerTrackActive] = useState(false);
+  const prevActiveRef = useRef(false);
 
   const mapRootRef = useRef(null);
   const mapRef = useRef(null);
@@ -299,9 +297,9 @@ export default function App() {
       if (!Number.isFinite(msg.lat) || !Number.isFinite(msg.lon)) return;
       setLast(msg);
 
-      // Always breadcrumb in viewer mode (fix gate optional)
-      if (isViewer || tracking) {
-        if (!autoBreadcrumbFixOnly || msg.fix) {
+      // VIEWER: breadcrumb ONLY if server reports an active track
+      if (isViewer) {
+        if (viewerTrackActive && (!autoBreadcrumbFixOnly || msg.fix)) {
           setPoints((prev) => {
             const p = { lat: msg.lat, lon: msg.lon, ts: Date.now() };
             if (prev.length === 0) return [p];
@@ -309,14 +307,31 @@ export default function App() {
             return moved >= MIN_STEP_M ? [...prev, p] : prev;
           });
         }
+        return;
+      }
+
+      // OPERATOR: breadcrumb when tracking
+      if (tracking && (!autoBreadcrumbFixOnly || msg.fix)) {
+        setPoints((prev) => {
+          const p = { lat: msg.lat, lon: msg.lon, ts: Date.now() };
+          if (prev.length === 0) return [p];
+          const moved = haversine(prev[prev.length - 1], p);
+          return moved >= MIN_STEP_M ? [...prev, p] : prev;
+        });
       }
     });
 
-  // Elapsed timer (viewer shows live duration since first point)
+  // Elapsed timer
   useInterval(() => {
     if (isViewer) {
-      if (!startAt && points.length > 0) setStartAt(points[0].ts);
-      if (startAt) setElapsed(Date.now() - startAt);
+      if (viewerTrackActive) {
+        if (!startAt && points.length > 0) setStartAt(points[0].ts);
+        if (startAt) setElapsed(Date.now() - startAt);
+      } else {
+        // no active track -> reset timer for viewer
+        setStartAt(null);
+        setElapsed(0);
+      }
     } else if (tracking && startAt) {
       setElapsed(Date.now() - startAt);
     }
@@ -331,13 +346,12 @@ export default function App() {
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isViewer]);
-
   useEffect(() => {
     if (isViewer) return;
     try { localStorage.setItem("k9-conn", JSON.stringify(conn)); } catch {}
   }, [conn, isViewer]);
 
-  // Viewer: allow URL overrides: host/port/ssl/topic
+  // Viewer: allow URL overrides
   useEffect(() => {
     if (!isViewer) return;
     const h = params.get("host");
@@ -354,7 +368,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isViewer]);
 
-  // Viewer: resolve share code -> topic (from Supabase)
+  // Viewer: resolve share code -> topic (optional)
   useEffect(() => {
     if (!shareCodeParam) return;
     (async () => {
@@ -376,16 +390,39 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareCodeParam]);
 
-  // Viewer: auto-connect once conn is ready
+  // Viewer: auto-connect
   useEffect(() => {
     if (!isViewer) return;
-    // basic readiness: have host/port/topic
     if (!conn.host || !conn.port || !conn.topic) return;
     connect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isViewer, conn.host, conn.port, conn.topic, conn.ssl]);
 
-  /* -------- Snapshot helpers -------- */
+  // Viewer: poll server for ACTIVE track status (every 10s)
+  useEffect(() => {
+    if (!isViewer) return;
+    const q = async () => {
+      try {
+        const qs = shareCodeParam
+          ? `code=${encodeURIComponent(shareCodeParam)}`
+          : `topic=${encodeURIComponent(conn.topic)}`;
+        const r = await fetch(`/api/tracks/active?${qs}`).then((res) => res.json());
+        setViewerTrackActive(Boolean(r?.active));
+      } catch {}
+    };
+    q();
+    const id = setInterval(q, 10000);
+    return () => clearInterval(id);
+  }, [isViewer, shareCodeParam, conn.topic]);
+
+  // Viewer: when active -> false, clear breadcrumbs (show only live dot)
+  useEffect(() => {
+    if (!isViewer) return;
+    if (prevActiveRef.current && !viewerTrackActive) setPoints([]);
+    prevActiveRef.current = viewerTrackActive;
+  }, [viewerTrackActive, isViewer]);
+
+  /* -------- Snapshot helpers (unchanged for viewer) -------- */
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
   function fitTrackBounds(map, pts, pad = 0.12) {
@@ -409,15 +446,12 @@ export default function App() {
       const node = mapRootRef.current;
       const map = mapRef.current;
       if (!node || !map || !id) return null;
-
       const prev = { center: map.getCenter(), zoom: map.getZoom() };
       fitTrackBounds(map, points, 0.12);
       await nextFrame();
       await wait(200);
-
       const dataUrl = await toPng(node, { cacheBust: true, pixelRatio: 2 });
       map.setView(prev.center, prev.zoom, { animate: false });
-
       const resp = await fetch("/api/tracks/uploadSnapshot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -430,7 +464,7 @@ export default function App() {
     }
   }
 
-  /* -------- K9 controls (hidden in viewer) -------- */
+  /* -------- Operator K9 controls (hidden in viewer) -------- */
   const startTrack = async () => {
     setSummary(null);
     setTrackId(null);
@@ -439,13 +473,11 @@ export default function App() {
     setElapsed(0);
     setTracking(true);
     setApiDiag("");
-
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) {
       setPoints([{ lat: last.lat, lon: last.lon, ts: Date.now() }]);
     } else {
       setPoints([]);
     }
-
     try {
       const r = await fetch("/api/tracks/create", {
         method: "POST",
@@ -460,13 +492,11 @@ export default function App() {
       if (r?.id) { setTrackId(r.id); setShareCode(r.shareCode); }
     } catch (e) {
       setApiDiag(`create error: ${String(e)}`);
-      console.warn("tracks/create failed:", e);
     }
   };
 
   const stopTrack = async () => {
     setTracking(false);
-
     const dist = distance;
     const durMs = startAt ? Date.now() - startAt : 0;
     const center = points.length ? points[Math.floor(points.length / 2)] : last;
@@ -501,16 +531,7 @@ export default function App() {
 
     const pace = paceStr(dist, durMs);
     const speed = speedStr(dist, durMs);
-
-    setSummary({
-      distance: dist,
-      durationMs: durMs,
-      weather,
-      elevation: elevationStats,
-      points,
-      paceMinPerKm: pace,
-      avgSpeedKmh: speed
-    });
+    setSummary({ distance: dist, durationMs: durMs, weather, elevation: elevationStats, points, paceMinPerKm: pace, avgSpeedKmh: speed });
 
     let snapshotUrl = null;
     if (trackId) {
@@ -537,7 +558,6 @@ export default function App() {
         if (r?.shareCode) setShareCode(r.shareCode);
       } catch (e) {
         setApiDiag((d) => `${d}\nfinish error: ${String(e)}`);
-        console.warn("tracks/finish failed:", e);
       }
     }
   };
@@ -581,11 +601,6 @@ export default function App() {
     return [30, -97];
   }, [last]);
 
-  const liveDistance = summary?.distance ?? distance;
-  const liveDuration = summary?.durationMs ?? elapsed;
-  const livePace = summary?.paceMinPerKm ?? paceStr(liveDistance, liveDuration);
-  const liveSpeed = summary?.avgSpeedKmh ?? speedStr(liveDistance, liveDuration);
-
   return (
     <div style={{ height: "100vh", width: "100%", background: "#f8fafc", display: "grid", gridTemplateRows: "auto 1fr" }}>
       {/* Header */}
@@ -609,27 +624,10 @@ export default function App() {
         <div style={{ fontSize: 18, fontWeight: 600, marginLeft: 8 }}>
           K9 Live Tracker {isViewer && <span style={{
             marginLeft: 8, fontSize: 12, fontWeight: 700,
-            color: "#1f2937", background: "#fde68a", border: "1px solid #f59e0b",
-            borderRadius: 8, padding: "2px 6px"
-          }}>VIEW ONLY</span>}
+            color: "#1f2937", background: viewerTrackActive ? "#bbf7d0" : "#fde68a",
+            border: "1px solid #94a3b8", borderRadius: 8, padding: "2px 6px"
+          }}>{viewerTrackActive ? "VIEW ONLY • TRACK ACTIVE" : "VIEW ONLY • LIVE POSITION"}</span>}
         </div>
-
-        {!isViewer && (
-          <div style={{ marginLeft: 16, display: "flex", gap: 6, background: "#f1f5f9", borderRadius: 14, padding: 6 }}>
-            <button onClick={() => setTab("live")}
-                    style={{ padding: "6px 10px", borderRadius: 10,
-                             background: tab === "live" ? "#fff" : "transparent",
-                             boxShadow: tab === "live" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}>
-              Live Map
-            </button>
-            <button onClick={() => setTab("k9")}
-                    style={{ padding: "6px 10px", borderRadius: 10,
-                             background: tab === "k9" ? "#fff" : "transparent",
-                             boxShadow: tab === "k9" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}>
-              K9 Track
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Content: Sidebar + Map */}
@@ -662,72 +660,47 @@ export default function App() {
                 crumbs={points.length}
                 apiDiag={apiDiag}
               />
+              <div style={{ marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)", border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)", fontSize: 12 }}>
+                <div style={{ fontWeight: 600 }}>Last fix</div>
+                <div>lat: {Number.isFinite(last?.lat) ? last.lat.toFixed(6) : "—"}
+                    &nbsp; lon: {Number.isFinite(last?.lon) ? last.lon.toFixed(6) : "—"}</div>
+                <div>fix: {String(last?.fix ?? false)} &nbsp; sats: {Number.isFinite(last?.sats) ? last.sats : "—"}</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input type="checkbox" checked={recenterOnUpdate} onChange={(e) => setRecenterOnUpdate(e.target.checked)} />
+                  Recenter on update
+                </label>
+              </div>
 
-              {last && (
-                <div style={{
-                  marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)",
-                  border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)",
-                  fontSize: 12
-                }}>
-                  <div style={{ fontWeight: 600 }}>Last fix</div>
-                  <div>lat: {Number.isFinite(last.lat) ? last.lat.toFixed(6) : "—"}
-                      &nbsp; lon: {Number.isFinite(last.lon) ? last.lon.toFixed(6) : "—"}</div>
-                  <div>fix: {String(last.fix)} &nbsp; sats: {Number.isFinite(last.sats) ? last.sats : "—"}</div>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <input
-                      type="checkbox"
-                      checked={recenterOnUpdate}
-                      onChange={(e) => setRecenterOnUpdate(e.target.checked)}
-                    />
-                    Recenter on update
-                  </label>
+              <div style={{ marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)", border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)", fontSize: 12 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>K9 Track Controls</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {!tracking ? (
+                    <button onClick={startTrack} style={{ padding: "6px 10px", borderRadius: 10, background: "#16a34a", color: "#fff" }}>
+                      Start
+                    </button>
+                  ) : (
+                    <button onClick={stopTrack} style={{ padding: "6px 10px", borderRadius: 10, background: "#dc2626", color: "#fff" }}>
+                      Stop
+                    </button>
+                  )}
+                  <button onClick={clearTrack} style={{ padding: "6px 10px", borderRadius: 10 }}>Clear</button>
                 </div>
-              )}
-
-              {tab === "k9" && (
-                <div style={{
-                  marginTop: 8, padding: 12, background: "rgba(255,255,255,0.95)",
-                  border: "1px solid #e5e7eb", borderRadius: 16, boxShadow: "0 4px 16px rgba(0,0,0,.08)",
-                  fontSize: 12
-                }}>
-                  <div style={{ fontWeight: 600, marginBottom: 6 }}>K9 Track Controls</div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {!tracking ? (
-                      <button onClick={startTrack}
-                              style={{ padding: "6px 10px", borderRadius: 10, background: "#16a34a", color: "#fff" }}>
-                        Start
-                      </button>
-                    ) : (
-                      <button onClick={stopTrack}
-                              style={{ padding: "6px 10px", borderRadius: 10, background: "#dc2626", color: "#fff" }}>
-                        Stop
-                      </button>
-                    )}
-                    <button onClick={clearTrack} style={{ padding: "6px 10px", borderRadius: 10 }}>Clear</button>
-                  </div>
-
-                  <div style={{ marginTop: 6 }}>Time: {prettyDuration(elapsed)}</div>
-                  <div>Distance: {prettyDistance(distance)}</div>
-                  <div>Pace: {paceStr(distance, elapsed)}</div>
-                  <div>Avg speed: {speedStr(distance, elapsed)}</div>
-
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-                    <input
-                      type="checkbox"
-                      checked={autoBreadcrumbFixOnly}
-                      onChange={(e) => setAutoBreadcrumbFixOnly(e.target.checked)}
-                    />
-                    Only add crumbs when fix=true
-                  </label>
-                </div>
-              )}
+                <div style={{ marginTop: 6 }}>Time: {prettyDuration(elapsed)}</div>
+                <div>Distance: {prettyDistance(distance)}</div>
+                <div>Pace: {paceStr(distance, elapsed)}</div>
+                <div>Avg speed: {speedStr(distance, elapsed)}</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                  <input type="checkbox" checked={autoBreadcrumbFixOnly} onChange={(e) => setAutoBreadcrumbFixOnly(e.target.checked)} />
+                  Only add crumbs when fix=true
+                </label>
+              </div>
             </>
           )}
         </aside>
 
         {/* Map */}
         <main ref={mapRootRef} style={{ position: "relative", minWidth: 0 }}>
-          {/* Overlay included in snapshot */}
+          {/* Overlay (always visible) */}
           <div style={{
             position: "absolute", top: 12, right: 12, zIndex: 400,
             background: "rgba(255,255,255,0.95)", border: "1px solid #e5e7eb",
@@ -741,6 +714,7 @@ export default function App() {
               <div><b>Duration:</b> {prettyDuration(elapsed)}</div>
               <div><b>Pace:</b> {paceStr(distance, elapsed)}</div>
               <div><b>Avg speed:</b> {speedStr(distance, elapsed)}</div>
+              {/* Weather shown only after operator Stop() populates summary */}
               {summary?.weather ? (
                 <div><b>Weather:</b> {summary.weather.temperature}°C, wind {summary.weather.windspeed} km/h</div>
               ) : (
@@ -758,21 +732,16 @@ export default function App() {
             style={{ height: "100%", width: "100%" }}
             whenCreated={(m) => (mapRef.current = m)}
           >
-            <TileLayer
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-              attribution="&copy; OpenStreetMap"
-            />
+            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
             {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
               <Recenter lat={last.lat} lon={last.lon} />
             )}
             {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
               <CircleMarker center={[last.lat, last.lon]} radius={8} pathOptions={{ color: "#111" }} />
             )}
-            {points.length > 0 && (
-              <Polyline
-                positions={points.map((p) => [p.lat, p.lon])}
-                pathOptions={{ color: "#2563eb", weight: 4, opacity: 0.9 }}
-              />
+            {/* Show polyline: operator during tracking, viewer only when a track is active */}
+            {((!isViewer && points.length > 0) || (isViewer && viewerTrackActive && points.length > 0)) && (
+              <Polyline positions={points.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2563eb", weight: 4, opacity: 0.9 }} />
             )}
           </MapContainer>
         </main>
@@ -780,6 +749,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 
