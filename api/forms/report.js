@@ -16,9 +16,12 @@ module.exports = async (req, res) => {
   try {
     const supabase = createClient(need("SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE"));
 
-    const { handler, dog, email, track_id, notes, attachment_url } = req.body || {};
+    const {
+      handler, dog, email, track_id, notes,
+      attachment_url,     // optional uploaded file (from Storage)
+      map_snapshot_url    // <-- pass snapshotUrl from the app if you want it shown in the report
+    } = req.body || {};
 
-    // Basic validation
     if (!handler || !dog) {
       res.statusCode = 400;
       return res.json({ error: "handler and dog are required" });
@@ -26,20 +29,18 @@ module.exports = async (req, res) => {
 
     const { data, error } = await supabase
       .from("reports")
-      .insert([{ handler, dog, email, track_id, notes, attachment_url }])
+      .insert([{
+        handler, dog, email, track_id, notes,
+        attachment_url: attachment_url || map_snapshot_url || null,
+        map_snapshot_url: map_snapshot_url || null
+      }])
       .select()
-      .limit(1)
       .single();
 
-    if (error) {
-      res.statusCode = 500;
-      return res.json({ error: error.message });
-    }
+    if (error) throw error;
 
-    res.statusCode = 200;
-    res.json({ ok: true, id: data.id });
+    res.status(200).json({ ok: true, id: data.id });
   } catch (e) {
-    res.statusCode = 500;
-    res.json({ error: String(e.message || e) });
+    res.status(500).json({ error: String(e.message || e) });
   }
 };
