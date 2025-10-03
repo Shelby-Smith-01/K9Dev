@@ -1,7 +1,4 @@
 // api/forms/report.js
-// Server-only route to insert a report into public.reports using the SERVICE ROLE key.
-// Runtime: node (NOT edge)
-
 const { createClient } = require("@supabase/supabase-js");
 
 function need(name) {
@@ -29,19 +26,17 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const {
       handler,         // required
       dog,             // required
       email,           // optional
       notes,           // optional
       track_id,        // optional (uuid)
-      attachment_url,  // optional
-      department_name, // optional
-      logo_url         // optional
+      attachment_url   // optional
+      // DO NOT send department_name / logo_url unless you added those columns
     } = body;
 
-    // Validate
     if (!handler || !dog) {
       res.statusCode = 400;
       return res.end(JSON.stringify({ error: "handler and dog are required" }));
@@ -51,7 +46,6 @@ module.exports = async (req, res) => {
       return res.end(JSON.stringify({ error: "track_id must be a UUID" }));
     }
 
-    // Compose insert payload; include optional branding fields if your table has them
     const payload = {
       handler,
       dog,
@@ -59,9 +53,6 @@ module.exports = async (req, res) => {
       notes: notes || null,
       track_id: track_id || null,
       attachment_url: attachment_url || null,
-      // If you added these columns to `reports`, keep them. Otherwise remove:
-      department_name: department_name || null,
-      logo_url: logo_url || null,
     };
 
     const { data, error } = await supabase
@@ -87,8 +78,5 @@ module.exports = async (req, res) => {
   }
 };
 
-// Vercel config: ensure node runtime (not edge)
-module.exports.config = {
-  runtime: "nodejs",
-};
+module.exports.config = { runtime: "nodejs" };
 
