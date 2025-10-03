@@ -4,7 +4,6 @@ import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-l
 import * as htmlToImage from "html-to-image";
 import "leaflet/dist/leaflet.css";
 
-// PDF + Report + Supabase
 import { PDFDownloadLink, pdf } from "@react-pdf/renderer";
 import ReportPDF from "./components/ReportPDF";
 import ReportForm from "./components/ReportForm";
@@ -21,9 +20,7 @@ const haversine = (a, b) => {
   const dLon = toRad(b.lon - a.lon);
   const lat1 = toRad(a.lat);
   const lat2 = toRad(b.lat);
-  const x =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   const d = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
   return R * d;
 };
@@ -64,7 +61,7 @@ function computeMetrics(distanceM, durationMs) {
 }
 
 /* =========================
-   SSE bridge to /api/stream (FIXED: uses onMessage ref)
+   SSE bridge to /api/stream (uses onMessage ref)
 ========================= */
 const defaultConn = {
   host: "broker.emqx.io",
@@ -78,7 +75,6 @@ function useSSE(conn, onMessage) {
   const [errorMsg, setErrorMsg] = useState("");
   const esRef = useRef(null);
 
-  // keep latest onMessage in a ref so listeners never get stale
   const onMsgRef = useRef(onMessage);
   useEffect(() => { onMsgRef.current = onMessage; }, [onMessage]);
 
@@ -222,23 +218,18 @@ export default function App() {
   const [latestReportNo, setLatestReportNo] = useState("");
 
   const mapShotRef = useRef(null);
+  const deviceId = "esp-shelby-01";
 
-  // === FIX: crumbs always collected while tracking; listener uses latest tracking via onMsgRef
   const { status, msgs, errorMsg, connect, disconnect } = useSSE(conn, (msg) => {
     if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) {
       setLast(msg);
-
       if (tracking) {
         setPoints((prev) => {
           const newPt = { lat: msg.lat, lon: msg.lon, ts: Date.now() };
           if (!Number.isFinite(newPt.lat) || !Number.isFinite(newPt.lon)) return prev;
-
           const lastPt = prev.length ? prev[prev.length - 1] : null;
           const seg = lastPt ? haversine(lastPt, newPt) : 0;
-
-          // ignore jitter < 0.5 m
-          if (lastPt && seg < 0.5) return prev;
-
+          if (lastPt && seg < 0.5) return prev; // ignore <0.5m jitter
           if (lastPt) setDistance((d) => d + seg);
           return [...prev, newPt];
         });
@@ -256,9 +247,29 @@ export default function App() {
     setPoints([]); setDistance(0); setElapsed(0); setStartAt(Date.now());
     setTracking(true); setSummary(null);
     setReportSubmitted(false); setSubmittedReport(null);
-    setLatestReportNo("");
+    setLatestReportNo(""); setTrackId(null);
 
-    // Optionally call /api/tracks/create here and setTrackId + setLatestReportNo(js.report_no)
+    // CREATE the track in your API so we get id + report_no NOW
+    try {
+      const resp = await fetch("/api/tracks/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: deviceId,
+          topic: conn.topic || "",
+          started_at: new Date().toISOString(),
+        }),
+      });
+      const js = await resp.json().catch(() => ({}));
+      if (resp.ok && js?.id) {
+        setTrackId(js.id);
+        if (js.report_no) setLatestReportNo(js.report_no);
+      } else {
+        console.warn("create track failed:", js);
+      }
+    } catch (e) {
+      console.warn("create error:", e);
+    }
   };
 
   const stopTrack = async () => {
@@ -267,11 +278,9 @@ export default function App() {
     const durMs = startAt ? Date.now() - startAt : 0;
 
     const pts = points.slice();
-    // Recompute distance robustly
     let dist = 0;
     for (let i = 1; i < pts.length; i++) dist += haversine(pts[i - 1], pts[i]);
 
-    // Weather/elevation
     const center = pts.length ? pts[Math.floor(pts.length / 2)] : last;
 
     let weather = null;
@@ -307,7 +316,6 @@ export default function App() {
     const { avg_speed_kmh, pace_min_per_km, pace_label, avg_speed_label } =
       computeMetrics(dist, durMs);
 
-    // Snapshot
     let snapshotDataUrl = null;
     try {
       if (mapShotRef.current) {
@@ -316,9 +324,7 @@ export default function App() {
           pixelRatio: 2,
         });
       }
-    } catch (e) {
-      console.warn("snapshot failed", e);
-    }
+    } catch (e) { console.warn("snapshot failed", e); }
 
     setSummary({
       distance: dist,
@@ -333,7 +339,6 @@ export default function App() {
       snapshotDataUrl,
     });
 
-    // Finalize server-side
     try {
       if (trackId) {
         const resp = await fetch("/api/tracks/finish", {
@@ -358,6 +363,8 @@ export default function App() {
             setSummary((s) => ({ ...s, report_no: js.report_no }));
             setLatestReportNo(js.report_no);
           }
+        } else {
+          console.warn("finish failed:", js);
         }
       }
     } catch (e) {
@@ -365,7 +372,7 @@ export default function App() {
     }
   };
 
-  // Backfill report_no if missing
+  // Backfill report_no by trackId if needed
   useEffect(() => {
     (async () => {
       if (trackId && !latestReportNo) {
@@ -380,14 +387,10 @@ export default function App() {
   }, [trackId, latestReportNo]);
 
   const center = useMemo(
-    () =>
-      last && Number.isFinite(last.lat) && Number.isFinite(last.lon)
-        ? [last.lat, last.lon]
-        : [30, -97],
+    () => (last && Number.isFinite(last.lat) && Number.isFinite(last.lon) ? [last.lat, last.lon] : [30, -97]),
     [last]
   );
 
-  const deviceId = "esp-shelby-01";
   const finalReportNo =
     (summary && summary.report_no) ||
     (submittedReport && submittedReport.report_no) ||
@@ -416,248 +419,93 @@ export default function App() {
       }}
     >
       {/* Left panel */}
-      <div
-        style={{
-          padding: 12,
-          overflowY: "auto",
-          borderRight: "1px solid #e5e7eb",
-          background: "#fff",
-        }}
-      >
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
-          K9 Live Tracker
-        </div>
+      <div style={{ padding: 12, overflowY: "auto", borderRight: "1px solid #e5e7eb", background: "#fff" }}>
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>K9 Live Tracker</div>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 6,
-            background: "#f1f5f9",
-            borderRadius: 14,
-            padding: 6,
-            marginBottom: 8,
-          }}
-        >
+        <div style={{ display: "flex", gap: 6, background: "#f1f5f9", borderRadius: 14, padding: 6, marginBottom: 8 }}>
           <button
             onClick={() => setTab("live")}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 10,
-              background: tab === "live" ? "#fff" : "transparent",
-              boxShadow: tab === "live" ? "0 2px 8px rgba(0,0,0,.06)" : "none",
-            }}
+            style={{ padding: "6px 10px", borderRadius: 10, background: tab === "live" ? "#fff" : "transparent",
+              boxShadow: tab === "live" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}
           >
             Live Map
           </button>
           <button
             onClick={() => setTab("k9")}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 10,
-              background: tab === "k9" ? "#fff" : "transparent",
-              boxShadow: tab === "k9" ? "0 2px 8px rgba(0,0,0,.06)" : "none",
-            }}
+            style={{ padding: "6px 10px", borderRadius: 10, background: tab === "k9" ? "#fff" : "transparent",
+              boxShadow: tab === "k9" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}
           >
             K9 Track
           </button>
         </div>
 
         {/* Connection panel (SSE) */}
-        <div
-          style={{
-            padding: 12,
-            background: "rgba(255,255,255,0.98)",
-            border: "1px solid #e5e7eb",
-            borderRadius: 12,
-            maxWidth: 420,
-          }}
-        >
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
-            MQTT (SSE bridge)
-          </div>
+        <div style={{ padding: 12, background: "rgba(255,255,255,0.98)", border: "1px solid #e5e7eb", borderRadius: 12, maxWidth: 420 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>MQTT (SSE bridge)</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <label style={{ fontSize: 12 }}>
               Host
-              <input
-                value={conn.host}
-                onChange={(e) => setConn({ ...conn, host: e.target.value })}
-                style={{ width: "100%" }}
-              />
+              <input value={conn.host} onChange={(e) => setConn({ ...conn, host: e.target.value })} style={{ width: "100%" }} />
             </label>
             <label style={{ fontSize: 12 }}>
               Port
-              <input
-                value={conn.port}
-                onChange={(e) =>
-                  setConn({ ...conn, port: Number(e.target.value) || 0 })
-                }
-                style={{ width: "100%" }}
-              />
+              <input value={conn.port} onChange={(e) => setConn({ ...conn, port: Number(e.target.value) || 0 })} style={{ width: "100%" }} />
             </label>
           </div>
           <label style={{ fontSize: 12, display: "block", marginTop: 8 }}>
             Topic
-            <input
-              value={conn.topic}
-              onChange={(e) => setConn({ ...conn, topic: e.target.value })}
-              style={{ width: "100%" }}
-            />
+            <input value={conn.topic} onChange={(e) => setConn({ ...conn, topic: e.target.value })} style={{ width: "100%" }} />
           </label>
-          <label
-            style={{
-              fontSize: 12,
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              marginTop: 6,
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={conn.ssl}
-              onChange={(e) => setConn({ ...conn, ssl: e.target.checked })}
-            />{" "}
-            TLS (8883)
+          <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+            <input type="checkbox" checked={conn.ssl} onChange={(e) => setConn({ ...conn, ssl: e.target.checked })} /> TLS (8883)
           </label>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginTop: 8,
-              fontSize: 13,
-            }}
-          >
-            <button
-              onClick={connect}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 10,
-                background: "#111",
-                color: "#fff",
-              }}
-            >
-              Connect
-            </button>
-            <button
-              onClick={disconnect}
-              style={{ padding: "6px 10px", borderRadius: 10 }}
-            >
-              Disconnect
-            </button>
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                marginLeft: 8,
-              }}
-            >
-              <span
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: "50%",
-                  background:
-                    status === "connected"
-                      ? "#22c55e"
-                      : status === "error"
-                      ? "#ef4444"
-                      : status === "reconnecting"
-                      ? "#f59e0b"
-                      : "#d1d5db",
-                }}
-              />
-              <span style={{ fontSize: 12, color: "#6b7280" }}>
-                {status || "idle"}
-              </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 13 }}>
+            <button onClick={connect} style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>Connect</button>
+            <button onClick={disconnect} style={{ padding: "6px 10px", borderRadius: 10 }}>Disconnect</button>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: 8 }}>
+              <span style={{
+                width: 10, height: 10, borderRadius: "50%",
+                background: status === "connected" ? "#22c55e" : status === "error" ? "#ef4444" : status === "reconnecting" ? "#f59e0b" : "#d1d5db",
+              }}/>
+              <span style={{ fontSize: 12, color: "#6b7280" }}>{status || "idle"}</span>
             </span>
-            <span style={{ marginLeft: "auto", fontSize: 12, color: "#6b7280" }}>
-              Msgs: {msgs}
-            </span>
+            <span style={{ marginLeft: "auto", fontSize: 12, color: "#6b7280" }}>Msgs: {msgs}</span>
           </div>
+          {status === "error" && errorMsg && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#b91c1c", whiteSpace: "pre-wrap" }}>{errorMsg}</div>
+          )}
         </div>
 
         {last && (
-          <div
-            style={{
-              marginTop: 8,
-              padding: 12,
-              background: "rgba(255,255,255,0.98)",
-              border: "1px solid #e5e7eb",
-              borderRadius: 12,
-            }}
-          >
+          <div style={{ marginTop: 8, padding: 12, background: "rgba(255,255,255,0.98)", border: "1px solid #e5e7eb", borderRadius: 12 }}>
             <div style={{ fontWeight: 600, marginBottom: 4 }}>Last fix</div>
-            <div>
-              lat: {Number.isFinite(last.lat) ? last.lat.toFixed(6) : "—"} lon:{" "}
-              {Number.isFinite(last.lon) ? last.lon.toFixed(6) : "—"}
-            </div>
-            <div>
-              fix: {String(last.fix)} sats:{" "}
-              {Number.isFinite(last.sats) ? last.sats : "—"}
-            </div>
+            <div>lat: {Number.isFinite(last.lat) ? last.lat.toFixed(6) : "—"} lon: {Number.isFinite(last.lon) ? last.lon.toFixed(6) : "—"}</div>
+            <div>fix: {String(last.fix)} sats: {Number.isFinite(last.sats) ? last.sats : "—"}</div>
             <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={recenterOnUpdate}
-                onChange={(e) => setRecenterOnUpdate(e.target.checked)}
-              />{" "}
-              Recenter on update
+              <input type="checkbox" checked={recenterOnUpdate} onChange={(e) => setRecenterOnUpdate(e.target.checked)} /> Recenter on update
             </label>
           </div>
         )}
 
         {/* Track controls (hidden for viewer) */}
         {tab === "k9" && !isViewer && (
-          <div
-            style={{
-              marginTop: 8,
-              padding: 12,
-              background: "rgba(255,255,255,0.98)",
-              border: "1px solid #e5e7eb",
-              borderRadius: 12,
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>
-              K9 Track Controls
-            </div>
+          <div style={{ marginTop: 8, padding: 12, background: "rgba(255,255,255,0.98)", border: "1px solid #e5e7eb", borderRadius: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>K9 Track Controls</div>
             <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
               {!tracking ? (
-                <button
-                  onClick={startTrack}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: 10,
-                    background: "#16a34a",
-                    color: "#fff",
-                  }}
-                >
+                <button onClick={startTrack} style={{ padding: "6px 10px", borderRadius: 10, background: "#16a34a", color: "#fff" }}>
                   Start
                 </button>
               ) : (
-                <button
-                  onClick={stopTrack}
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: 10,
-                    background: "#dc2626",
-                    color: "#fff",
-                  }}
-                >
+                <button onClick={stopTrack} style={{ padding: "6px 10px", borderRadius: 10, background: "#dc2626", color: "#fff" }}>
                   Stop
                 </button>
               )}
               <button
                 onClick={() => {
-                  setPoints([]);
-                  setDistance(0);
-                  setElapsed(0);
-                  setStartAt(null);
-                  setSummary(null);
-                  setReportSubmitted(false);
-                  setSubmittedReport(null);
-                  setLatestReportNo("");
+                  setPoints([]); setDistance(0); setElapsed(0); setStartAt(null);
+                  setSummary(null); setReportSubmitted(false); setSubmittedReport(null);
+                  setLatestReportNo(""); setTrackId(null);
                 }}
                 style={{ padding: "6px 10px", borderRadius: 10 }}
               >
@@ -671,49 +519,27 @@ export default function App() {
 
             {/* Summary after Stop */}
             {summary && !tracking && (
-              <div
-                style={{
-                  marginTop: 8,
-                  padding: 8,
-                  background: "#f1f5f9",
-                  borderRadius: 8,
-                }}
-              >
+              <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
-                <div>Track #: {(submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)"}</div>
+                <div>Track #: {finalReportNo}</div>
+                <div>Track ID: {trackId || "—"}</div>
                 <div>Distance: {prettyDistance(summary.distance)}</div>
                 <div>Duration: {prettyDuration(summary.durationMs)}</div>
                 <div>Pace: {summary.pace_label ?? "—"}</div>
                 <div>Avg speed: {summary.avg_speed_label ?? "—"}</div>
                 <div>
-                  Weather:{" "}
-                  {summary.weather
-                    ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h`
-                    : "—"}
+                  Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
                 </div>
                 <div>
-                  Elevation:{" "}
-                  {summary.elevation
-                    ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(
-                        summary.elevation.loss
-                      )} m`
-                    : "—"}
+                  Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
                 </div>
                 {(summary.snapshotUrl || summary.snapshotDataUrl) && (
                   <div style={{ marginTop: 8 }}>
                     <img
                       src={summary.snapshotUrl || summary.snapshotDataUrl}
                       alt="snapshot"
-                      style={{
-                        maxWidth: "100%",
-                        borderRadius: 6,
-                        border: "1px solid #e5e7eb",
-                      }}
-                      onError={(e) => {
-                        e.currentTarget.alt = `Failed to load: ${
-                          summary.snapshotUrl || summary.snapshotDataUrl
-                        }`;
-                      }}
+                      style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
+                      onError={(e) => { e.currentTarget.alt = `Failed to load: ${summary.snapshotUrl || summary.snapshotDataUrl}`; }}
                     />
                   </div>
                 )}
@@ -727,9 +553,9 @@ export default function App() {
           <div style={{ marginTop: 8 }}>
             <ReportForm
               defaultTrackId={trackId}
-              report_no={(submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)"}
+              report_no={finalReportNo}
               snapshotUrl={summary?.snapshotUrl || summary?.snapshotDataUrl || ""}
-              device_id={"esp-shelby-01"}
+              device_id={deviceId}
               onSubmitted={(info) => {
                 setReportSubmitted(true);
                 setSubmittedReport(info);
@@ -741,42 +567,27 @@ export default function App() {
 
         {/* PDF buttons ONLY after report submitted */}
         {!isViewer && reportSubmitted && summary && (
-          <div
-            style={{
-              marginTop: 8,
-              padding: 12,
-              background: "rgba(255,255,255,0.98)",
-              border: "1px solid #e5e7eb",
-              borderRadius: 12,
-            }}
-          >
+          <div style={{ marginTop: 8, padding: 12, background: "rgba(255,255,255,0.98)", border: "1px solid #e5e7eb", borderRadius: 12 }}>
             <div style={{ fontWeight: 600, marginBottom: 6 }}>Report PDF</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <PDFDownloadLink
                 document={
                   <ReportPDF
                     {...buildPdfProps(summary, {
-                      report_no: (submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)",
+                      report_no: finalReportNo,
                       handler: "Shelby",
                       dog: "Rogue",
                       email: "TestPD@TestCity.Gov",
-                      device_id: "esp-shelby-01",
+                      device_id: deviceId,
                       track_id: trackId || "",
                       notes: submittedReport?.notes || "",
                     })}
                   />
                 }
-                fileName={`k9_report_${(submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "latest"}.pdf`}
+                fileName={`k9_report_${finalReportNo || "latest"}.pdf`}
               >
                 {({ loading }) => (
-                  <button
-                    style={{
-                      padding: "6px 10px",
-                      borderRadius: 10,
-                      background: "#111",
-                      color: "#fff",
-                    }}
-                  >
+                  <button style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>
                     {loading ? "Building…" : "Download PDF"}
                   </button>
                 )}
@@ -789,11 +600,11 @@ export default function App() {
                     const blob = await pdf(
                       <ReportPDF
                         {...buildPdfProps(summary, {
-                          report_no: (submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)",
+                          report_no: finalReportNo,
                           handler: "Shelby",
                           dog: "Rogue",
                           email: "TestPD@TestCity.Gov",
-                          device_id: "esp-shelby-01",
+                          device_id: deviceId,
                           track_id: trackId || "",
                           notes: submittedReport?.notes || "",
                         })}
@@ -834,22 +645,15 @@ export default function App() {
           zoom={13}
           style={{ height: "100%", width: "100%" }}
         >
-          <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution="&copy; OpenStreetMap"
-          />
-          {recenterOnUpdate &&
-            last &&
-            Number.isFinite(last.lat) &&
-            Number.isFinite(last.lon) && <Recenter lat={last.lat} lon={last.lon} />}
+          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+          {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
+            <Recenter lat={last.lat} lon={last.lon} />
+          )}
           {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
             <CircleMarker center={[last.lat, last.lon]} radius={8} pathOptions={{ color: "#111" }} />
           )}
           {(tab === "k9" ? points : []).length > 0 && (
-            <Polyline
-              positions={points.map((p) => [p.lat, p.lon])}
-              pathOptions={{ color: "#2563eb", weight: 4, opacity: 0.9 }}
-            />
+            <Polyline positions={points.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2563eb", weight: 4, opacity: 0.9 }} />
           )}
         </MapContainer>
       </div>
