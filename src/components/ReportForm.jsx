@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 
-/** Optional client for uploading attachments to Supabase Storage (public bucket). */
+/** Optional client for uploading attachments to Supabase Storage (public bucket "attachments"). */
 const supabase =
   (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY)
     ? createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY)
@@ -15,7 +15,10 @@ function FormHeader() {
     "https://upload.wikimedia.org/wikipedia/commons/a/a4/Flag_of_the_United_States.svg";
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, paddingBottom: 12, marginBottom: 16, borderBottom: "1px solid #e5e7eb" }}>
+    <div style={{
+      display: "flex", alignItems: "center", gap: 12,
+      paddingBottom: 12, marginBottom: 16, borderBottom: "1px solid #e5e7eb"
+    }}>
       <img src={logo} alt={`${dept} logo`} style={{ height: 44, width: "auto", borderRadius: 6, objectFit: "contain" }} />
       <div>
         <div style={{ fontSize: 18, fontWeight: 800 }}>{dept}</div>
@@ -36,11 +39,11 @@ const inputStyle = {
 };
 
 function prettyDistance(m) {
-  if (!m && m !== 0) return "—";
+  if (!Number.isFinite(m)) return "—";
   return m < 1000 ? `${m.toFixed(1)} m` : `${(m / 1000).toFixed(2)} km`;
 }
 function prettyDuration(ms) {
-  if (!ms && ms !== 0) return "—";
+  if (!Number.isFinite(ms)) return "—";
   const s = Math.floor(ms / 1000);
   const hh = Math.floor(s / 3600);
   const mm = Math.floor((s % 3600) / 60);
@@ -49,15 +52,24 @@ function prettyDuration(ms) {
   return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
 }
 
+/**
+ * Props you can pass from App.jsx (all optional except handler/dog entered by user):
+ * - defaultTrackId: string (prefills the Track ID field)
+ * - snapshotUrl: string (map image to preview and attach)
+ * - distance_m, duration_ms: numbers
+ * - pace_min_per_km, avg_speed_kmh: strings
+ * - weather: { temperature, windspeed }
+ * - report_no: "YYYY-MM-XXX" (display only)
+ */
 export default function ReportForm({
   defaultTrackId,
-  // Optional snapshot & stats from your App.jsx
-  snapshotUrl,            // e.g. summary?.snapshotUrl
-  distance_m,             // number (meters)
-  duration_ms,            // number (ms)
-  pace_min_per_km,        // string like "5:42 min/km"
-  avg_speed_kmh,          // string like "10.45 km/h"
-  weather                 // e.g. { temperature, windspeed }
+  snapshotUrl,
+  distance_m,
+  duration_ms,
+  pace_min_per_km,
+  avg_speed_kmh,
+  weather,
+  report_no,
 }) {
   const [form, setForm] = useState({
     handler: "",
@@ -76,21 +88,26 @@ export default function ReportForm({
 
   async function maybeUploadFile() {
     if (!file || !supabase) return null;
-    const path = `reports/${crypto.randomUUID()}_${file.name}`;
+    const safeName = file.name.replace(/[^\w.\-]+/g, "_");
+    const path = `reports/${crypto.randomUUID()}_${safeName}`;
     const { error: upErr } = await supabase.storage.from("attachments").upload(path, file, { upsert: false });
     if (upErr) throw upErr;
     const { data } = supabase.storage.from("attachments").getPublicUrl(path);
     return data?.publicUrl || null;
   }
 
-  const payloadPreview = useMemo(() => ({
-    handler: form.handler || "(required)",
-    dog: form.dog || "(required)",
-    email: form.email || "",
-    track_id: form.track_id || "",
-    notes: form.notes || "",
-    attachment_url: file ? "(uploaded file will be linked)" : (includeSnapshot && snapshotUrl ? snapshotUrl : ""),
-  }), [form, file, includeSnapshot, snapshotUrl]);
+  const payloadPreview = useMemo(
+    () => ({
+      handler: form.handler || "(required)",
+      dog: form.dog || "(required)",
+      email: form.email || "",
+      track_id: form.track_id || "",
+      notes: form.notes || "",
+      // The API will store both attachment_url (file if uploaded) and map_snapshot_url (if provided)
+      will_attach: file ? "uploaded file" : (includeSnapshot && snapshotUrl ? "map snapshot" : "none"),
+    }),
+    [form, file, includeSnapshot, snapshotUrl]
+  );
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -99,26 +116,28 @@ export default function ReportForm({
     setResult(null);
 
     try {
+      // 1) A file overrides the snapshot as the primary attachment
       let attachment_url = null;
-
-      // 1) A file overrides the snapshot
       if (file) {
         attachment_url = await maybeUploadFile();
-      } else if (includeSnapshot && snapshotUrl) {
-        // 2) No file selected -> use the map snapshot URL if allowed
-        attachment_url = snapshotUrl;
       }
+
+      const body = {
+        ...form,
+        attachment_url,                                    // may be null
+        map_snapshot_url: includeSnapshot ? snapshotUrl || null : null, // stored in a dedicated column
+      };
 
       const resp = await fetch("/api/forms/report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, attachment_url }),
+        body: JSON.stringify(body),
       }).then((r) => r.json());
 
       if (!resp.ok) throw new Error(resp.error || "Submit failed");
       setResult(resp);
 
-      // Reset form fields, keep track_id prefill
+      // Reset form (keep track_id prefill)
       setForm({ handler: "", dog: "", email: "", track_id: defaultTrackId || "", notes: "" });
       setFile(null);
     } catch (err) {
@@ -129,13 +148,30 @@ export default function ReportForm({
   };
 
   return (
-    <div style={{ maxWidth: 640, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16, padding: 16, boxShadow: "0 10px 30px rgba(0,0,0,.06)" }}>
+    <div style={{
+      maxWidth: 680,
+      background: "#fff",
+      border: "1px solid #e5e7eb",
+      borderRadius: 16,
+      padding: 16,
+      boxShadow: "0 10px 30px rgba(0,0,0,.06)",
+    }}>
       <FormHeader />
 
-      {/* Optional Track Summary & Snapshot Preview */}
-      {(snapshotUrl || distance_m != null || duration_ms != null || pace_min_per_km || avg_speed_kmh || weather) && (
+      {/* Optional: show report number if provided */}
+      {report_no && (
+        <div style={{
+          marginBottom: 12, padding: 10, borderRadius: 10,
+          background: "#f8fafc", border: "1px solid #e5e7eb", fontSize: 12, color: "#334155"
+        }}>
+          <b>Track Report #:</b> {report_no}
+        </div>
+      )}
+
+      {/* Track Summary + Snapshot Preview */}
+      {(snapshotUrl || Number.isFinite(distance_m) || Number.isFinite(duration_ms) || pace_min_per_km || avg_speed_kmh || weather) && (
         <div style={{ display: "grid", gap: 12, marginBottom: 12 }}>
-          <div style={{ display: "grid", gap: 6, gridTemplateColumns: "1fr 1fr" }}>
+          <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr 1fr" }}>
             <div style={{ fontSize: 12, color: "#374151", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 12, padding: 10 }}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>Track Summary</div>
               <div><b>Distance:</b> {prettyDistance(distance_m)}</div>
@@ -158,7 +194,7 @@ export default function ReportForm({
                   <img src={snapshotUrl} alt="Map snapshot" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 </div>
                 <div style={{ marginTop: 6, fontSize: 11, color: "#6b7280" }}>
-                  The image above was generated when you stopped the live track.
+                  The image above was generated when the live track was stopped.
                 </div>
               </div>
             )}
@@ -166,6 +202,7 @@ export default function ReportForm({
         </div>
       )}
 
+      {/* Form */}
       <form onSubmit={onSubmit} style={{ display: "grid", gap: 12 }}>
         <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr" }}>
           <label style={{ fontSize: 12, color: "#374151" }}>
@@ -202,7 +239,7 @@ export default function ReportForm({
             style={{ display: "block", padding: 8, border: "1px solid #e5e7eb", borderRadius: 10, width: "100%", background: "#f9fafb" }}
           />
           <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>
-            If you attach a file, it will be used instead of the map snapshot.
+            If you attach a file, it will be used as the primary attachment; the map snapshot is still saved separately in the report.
           </div>
         </label>
 
@@ -213,7 +250,7 @@ export default function ReportForm({
         {error && <div style={{ color: "#b91c1c", fontSize: 12 }}>{error}</div>}
         {result?.ok && <div style={{ color: "#16a34a", fontSize: 12 }}>Saved! ID: {result.id}</div>}
 
-        {/* Tiny payload preview to verify what will be sent */}
+        {/* Tiny payload preview */}
         <details style={{ fontSize: 12, color: "#334155" }}>
           <summary>Payload preview</summary>
           <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(payloadPreview, null, 2)}</pre>
@@ -222,4 +259,5 @@ export default function ReportForm({
     </div>
   );
 }
+
 
