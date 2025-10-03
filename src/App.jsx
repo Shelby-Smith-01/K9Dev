@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import * as htmlToImage from "html-to-image";
+import { PDFDownloadLink, pdf } from "@react-pdf/renderer";
+import ReportPDF from "./components/ReportPDF";
 import ReportForm from "./components/ReportForm";
 import { supabase } from "./lib/supabaseClient";
 
@@ -61,8 +63,7 @@ const defaultConn = {
   topic: `devices/${DEVICE_ID}/#`,
 };
 
-/* ============= SSE Bridge ============= */
-// FIX: keep latest onMessage/onDiag via refs so the handler sees current tracking/viewerMode
+/* ============= SSE Bridge (MQTT -> SSE) ============= */
 function useSSE(conn, onMessage, onDiag) {
   const [status, setStatus] = useState("idle");
   const [msgs, setMsgs] = useState(0);
@@ -127,7 +128,7 @@ function useSSE(conn, onMessage, onDiag) {
   return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
-/* ============= Map helpers ============= */
+/* ============= Map Helpers ============= */
 function Recenter({ lat, lon }) {
   const map = useMap();
   useEffect(() => {
@@ -193,7 +194,6 @@ function ConnectionPanel({
         </div>
       )}
 
-      {/* Debug: points counter */}
       <div style={{marginTop:8, fontSize:12, color:'#475569'}}>Points: {pointsCount}</div>
     </div>
   );
@@ -238,7 +238,7 @@ export default function App() {
     });
   }
 
-  // SSE with FIXED latest-state handler
+  // SSE hook
   const { status, msgs, errorMsg, lastPayload, connect, disconnect } = useSSE(
     conn,
     (topic, payloadTxt) => {
@@ -257,7 +257,7 @@ export default function App() {
         if (Number.isFinite(lat) && Number.isFinite(lon)) {
           setLast({ lat, lon, fix, sats, raw: js });
 
-          // Operator: add crumbs while tracking
+          // Operator crumbs
           if (!viewerMode && tracking) {
             if (!autoBreadcrumbFixOnly || fix) {
               setPoints((prev) => {
@@ -271,7 +271,7 @@ export default function App() {
             }
           }
 
-          // Viewer: only while active via control event
+          // Viewer crumbs only when active
           if (viewerMode && viewerTrackActive) {
             setPoints((prev) => {
               const next = [...prev, { lat, lon, ts: Date.now() }];
@@ -367,102 +367,85 @@ export default function App() {
   }
 
   async function stopTrack() {
-  if (!user) { alert("Sign in to stop a track."); return; }
-  try {
-    setTracking(false);
-    const durMs = startAt ? Date.now() - startAt : 0;
-    const dist = distance;
+    if (!user) { alert("Sign in to stop a track."); return; }
+    try {
+      setTracking(false);
+      const durMs = startAt ? Date.now() - startAt : 0;
+      const dist = distance;
 
-    // Weather near midpoint
-    const center = points.length ? points[Math.floor(points.length/2)] : last;
-    let weather=null, elevationStats=null;
-    try {
-      if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
-        const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then(r=>r.json());
-        weather = w?.current_weather || null;
-      }
-    } catch {}
-    try {
-      if (points.length) {
-        const sample = points.filter((_,i)=> i % Math.max(1, Math.floor(points.length / 100)) === 0);
-        const locs = sample.map(p=>`${p.lat},${p.lon}`).join("|");
-        const e = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`).then(r=>r.json());
-        const els = e?.results?.map(r=>r.elevation).filter(Number.isFinite) || [];
-        if (els.length) {
-          let gain=0, loss=0;
-          for (let i=1;i<els.length;i++) {
-            const d = els[i]-els[i-1];
-            if (d>0) gain += d; else loss += Math.abs(d);
-          }
-          elevationStats = { gain, loss };
+      const center = points.length ? points[Math.floor(points.length/2)] : last;
+      let weather=null, elevationStats=null;
+      try {
+        if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
+          const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then(r=>r.json());
+          weather = w?.current_weather || null;
         }
+      } catch {}
+      try {
+        if (points.length) {
+          const sample = points.filter((_,i)=> i % Math.max(1, Math.floor(points.length / 100)) === 0);
+          const locs = sample.map(p=>`${p.lat},${p.lon}`).join("|");
+          const e = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`).then(r=>r.json());
+          const els = e?.results?.map(r=>r.elevation).filter(Number.isFinite) || [];
+          if (els.length) {
+            let gain=0, loss=0;
+            for (let i=1;i<els.length;i++) {
+              const d = els[i]-els[i-1];
+              if (d>0) gain += d; else loss += Math.abs(d);
+            }
+            elevationStats = { gain, loss };
+          }
+        }
+      } catch {}
+
+      // numeric pace (minutes per km) and avg speed (km/h)
+      const paceNum = (dist > 0 && durMs > 0) ? Number(((durMs / 60000) / (dist / 1000)).toFixed(3)) : null;
+      let paceLabel = "—";
+      if (paceNum != null) {
+        const mm = Math.floor(paceNum);
+        const ss = Math.round((paceNum - mm) * 60);
+        paceLabel = `${mm}:${ss.toString().padStart(2,"0")} min/km`;
       }
-    } catch {}
+      const avgNum = (dist > 0 && durMs > 0) ? Number(((dist / 1000) / (durMs / 3600000)).toFixed(2)) : null;
+      const avgLabel = (avgNum != null) ? `${avgNum.toFixed(2)} km/h` : "—";
 
-    // --- Compute numeric + pretty labels ---
-    // numeric pace: minutes per km (e.g. 6.250 means 6m15s / km)
-    const paceNum = (dist > 0 && durMs > 0)
-      ? Number(((durMs / 60000) / (dist / 1000)).toFixed(3))
-      : null;
-    // pretty label for UI: "mm:ss min/km"
-    let paceLabel = "—";
-    if (paceNum != null) {
-      const mm = Math.floor(paceNum);
-      const ss = Math.round((paceNum - mm) * 60);
-      paceLabel = `${mm}:${ss.toString().padStart(2,"0")} min/km`;
-    }
+      const snapshotDataUrl = await captureSnapshot();
 
-    // numeric avg speed: km/h
-    const avgNum = (dist > 0 && durMs > 0)
-      ? Number(((dist / 1000) / (durMs / 3600000)).toFixed(2))
-      : null;
-    const avgLabel = (avgNum != null) ? `${avgNum.toFixed(2)} km/h` : "—";
+      const body = {
+        id: trackId,
+        device_id: DEVICE_ID,
+        distance_m: dist,
+        duration_ms: durMs,
+        pace_min_per_km: paceNum, // numeric for DB
+        avg_speed_kmh: avgNum,    // numeric for DB
+        weather,
+        elevation: elevationStats,
+        points,
+        snapshotDataUrl
+      };
+      const resp = await authFetch("/api/tracks/finish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(r=>r.json());
+      if (!resp.ok) throw new Error(resp.error || "finish failed");
 
-    // Snapshot (optional)
-    const snapshotDataUrl = await captureSnapshot();
+      setSummary({
+        distance: dist,
+        durationMs: durMs,
+        weather,
+        elevation: elevationStats,
+        points,
+        snapshotUrl: resp.snapshot_url || null,
+        report_no: resp.report_no || null,
+        paceMinPerKm: paceLabel,   // pretty for UI
+        avgSpeedKmh:  avgLabel,    // pretty for UI
+        paceNum, avgNum
+      });
 
-    // --- Send NUMERIC values to DB ---
-    const body = {
-      id: trackId,
-      device_id: DEVICE_ID,
-      distance_m: dist,            // numeric
-      duration_ms: durMs,          // numeric
-      pace_min_per_km: paceNum,    // numeric (NOT "mm:ss min/km")
-      avg_speed_kmh: avgNum,       // numeric (NOT "X km/h")
-      weather,
-      elevation: elevationStats,
-      points,
-      snapshotDataUrl
-    };
-
-    const resp = await authFetch("/api/tracks/finish", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }).then(r=>r.json());
-    if (!resp.ok) throw new Error(resp.error || "finish failed");
-
-    // Keep pretty strings for UI
-    setSummary({
-      distance: dist,
-      durationMs: durMs,
-      weather,
-      elevation: elevationStats,
-      points,
-      snapshotUrl: resp.snapshot_url || null,
-      report_no: resp.report_no || null,
-      paceMinPerKm: paceLabel,   // UI string
-      avgSpeedKmh:  avgLabel,    // UI string
-      // keep numeric too if you want to chart later:
-      paceNum,
-      avgNum,
-    });
-
-    setStartAt(null);
-  } catch (e) {
-    alert(e.message || String(e));
+      setStartAt(null);
+    } catch (e) { alert(e.message || String(e)); }
   }
-}
 
   function clearTrack() {
     setTracking(false);
@@ -524,9 +507,10 @@ export default function App() {
                 )}
                 <button onClick={clearTrack} style={{padding:'6px 10px', borderRadius:10}}>Clear</button>
               </div>
-              <div>Time: {prettyDuration(elapsed)}</div>
-              <div>Distance: {prettyDistance(distance)}</div>
+              <div>Time: {prettyDuration(tracking ? elapsed : (summary?.durationMs ?? 0))}</div>
+              <div>Distance: {prettyDistance(tracking ? distance : (summary?.distance ?? 0))}</div>
               <label style={{display:'flex', alignItems:'center', gap:6}}><input type="checkbox" checked={autoBreadcrumbFixOnly} onChange={(e)=>setAutoBreadcrumbFixOnly(e.target.checked)} /> Only add crumbs when fix=true</label>
+
               {summary && (
                 <div style={{marginTop:8, padding:8, background:'#f1f5f9', borderRadius:8}}>
                   <div style={{fontWeight:700, marginBottom:4}}>Summary</div>
@@ -537,6 +521,69 @@ export default function App() {
                   <div><b>Avg Speed:</b> {summary.avgSpeedKmh || '—'}</div>
                   <div><b>Weather:</b> {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : '—'}</div>
                   <div><b>Elevation:</b> {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : '—'}</div>
+
+                  {/* ===== PDF Buttons ===== */}
+                  <div style={{marginTop:8, display:'flex', gap:8}}>
+                    {/* View in new tab */}
+                    <button
+                      onClick={async () => {
+                        const pdfProps = {
+                          departmentName: "Test PD",
+                          logoUrl: "https://flagcdn.com/w320/us.png",
+                          reportNo: summary?.report_no,
+                          createdAt: new Date().toISOString(),
+                          handler: "",  // fill via ReportForm if desired
+                          dog: "",
+                          email: "",
+                          deviceId: DEVICE_ID,
+                          trackId,
+                          distance_m: summary?.distance ?? 0,
+                          duration_ms: summary?.durationMs ?? 0,
+                          pace_label: summary?.paceMinPerKm ?? "",
+                          avg_speed_label: summary?.avgSpeedKmh ?? "",
+                          weather: summary?.weather,
+                          snapshotUrl: summary?.snapshotUrl,
+                          notes: "",
+                        };
+                        const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
+                        const url = URL.createObjectURL(blob);
+                        window.open(url, "_blank", "noopener,noreferrer");
+                        // URL.revokeObjectURL(url); // optional later
+                      }}
+                      style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}
+                    >
+                      View PDF
+                    </button>
+
+                    {/* Download */}
+                    <PDFDownloadLink
+                      document={
+                        <ReportPDF
+                          departmentName="Test PD"
+                          logoUrl="https://flagcdn.com/w320/us.png"
+                          reportNo={summary?.report_no}
+                          createdAt={new Date().toISOString()}
+                          handler=""
+                          dog=""
+                          email=""
+                          deviceId={DEVICE_ID}
+                          trackId={trackId}
+                          distance_m={summary?.distance ?? 0}
+                          duration_ms={summary?.durationMs ?? 0}
+                          pace_label={summary?.paceMinPerKm ?? ""}
+                          avg_speed_label={summary?.avgSpeedKmh ?? ""}
+                          weather={summary?.weather}
+                          snapshotUrl={summary?.snapshotUrl}
+                          notes=""
+                        />
+                      }
+                      fileName={`k9_report_${summary?.report_no || trackId || "report"}.pdf`}
+                      style={{padding:'6px 10px', borderRadius:10}}
+                    >
+                      {({ loading }) => loading ? "Building…" : "Download PDF"}
+                    </PDFDownloadLink>
+                  </div>
+                  {/* ===== /PDF Buttons ===== */}
                 </div>
               )}
             </div>
@@ -610,4 +657,5 @@ export default function App() {
     </div>
   );
 }
+
 
