@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-l
 import "leaflet/dist/leaflet.css";
 import { toPng } from "html-to-image";
 import L from "leaflet";
+import ReportForm from "./components/ReportForm";
 
 /* ---------- Utilities ---------- */
 const haversine = (a, b) => {
@@ -646,6 +647,26 @@ export default function App() {
           opacity: panelOpen ? 1 : 0,
           transition: "opacity .2s ease"
         }}>
+{!isViewer && (
+  <>
+    {/* ...ConnectionPanel + Last fix + K9 Track Controls... */}
+
+    {/* Report Form card */}
+    <div
+      style={{
+        marginTop: 8,
+        padding: 12,
+        background: "rgba(255,255,255,0.95)",
+        border: "1px solid #e5e7eb",
+        borderRadius: 16,
+        boxShadow: "0 4px 16px rgba(0,0,0,.08)",
+      }}
+    >
+      <ReportForm defaultTrackId={trackId} />
+    </div>
+  </>
+)}
+
           {!isViewer && (
             <>
               <ConnectionPanel
