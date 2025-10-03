@@ -176,7 +176,7 @@ function buildPdfProps(summary, extras = {}) {
   return {
     departmentName: "Test PD",
     logoUrl: "https://flagcdn.com/w320/us.png",
-    reportNo: extras.report_no || "",
+    reportNo: extras.report_no || "", // <-- what ReportPDF expects
     createdAt: new Date().toISOString(),
     handler: extras.handler || "Shelby",
     dog: extras.dog || "Rogue",
@@ -216,22 +216,32 @@ export default function App() {
   const [reportSubmitted, setReportSubmitted] = useState(false);
   const [submittedReport, setSubmittedReport] = useState(null);
 
-  // if you create a track row on start, store its id here
+  // track id and track number (report_no)
   const [trackId, setTrackId] = useState(null);
+  const [latestReportNo, setLatestReportNo] = useState("");
 
   const mapShotRef = useRef(null);
 
+  // === Always collect crumbs while tracking (ignore <0.5 m jitter)
   const { status, msgs, errorMsg, connect, disconnect } = useSSE(conn, (msg) => {
     if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) {
       setLast(msg);
-      if (tab === "k9" && tracking) {
+
+      if (tracking) {
         setPoints((prev) => {
-          const next = [...prev, { lat: msg.lat, lon: msg.lon, ts: Date.now() }];
-          if (prev.length > 0) {
-            const seg = haversine(prev[prev.length - 1], next[next.length - 1]);
-            setDistance((d) => d + seg);
-          }
-          return next;
+          const newPt = { lat: msg.lat, lon: msg.lon, ts: Date.now() };
+          if (!Number.isFinite(newPt.lat) || !Number.isFinite(newPt.lon)) return prev;
+
+          const lastPt = prev.length ? prev[prev.length - 1] : null;
+          const seg = lastPt ? haversine(lastPt, newPt) : 0;
+
+          // ignore ultra-tiny jitter < 0.5 m
+          if (lastPt && seg < 0.5) return prev;
+
+          // keep a running total so the UI updates live
+          if (lastPt) setDistance((d) => d + seg);
+
+          return [...prev, newPt];
         });
       }
     }
@@ -247,17 +257,25 @@ export default function App() {
     setPoints([]); setDistance(0); setElapsed(0); setStartAt(Date.now());
     setTracking(true); setSummary(null);
     setReportSubmitted(false); setSubmittedReport(null);
+    setLatestReportNo("");
 
-    // Optionally create /api/tracks/create and setTrackId(newId)
+    // Optionally create /api/tracks/create and setTrackId(newId) and maybe setLatestReportNo(js.report_no)
   };
 
   const stopTrack = async () => {
     if (isViewer) return;
     setTracking(false);
     const durMs = startAt ? Date.now() - startAt : 0;
-    const dist = distance;
+
     const pts = points.slice();
 
+    // Recompute total distance from crumbs to be robust
+    let dist = 0;
+    for (let i = 1; i < pts.length; i++) {
+      dist += haversine(pts[i - 1], pts[i]);
+    }
+
+    // Pick a center point for weather sampling
     const center = pts.length ? pts[Math.floor(pts.length / 2)] : last;
 
     let weather = null;
@@ -307,6 +325,7 @@ export default function App() {
       console.warn("snapshot failed", e);
     }
 
+    // Provisional summary (may be updated with snapshot URL/report_no from server)
     setSummary({
       distance: dist,
       durationMs: durMs,
@@ -320,7 +339,7 @@ export default function App() {
       snapshotDataUrl, // may be replaced with server URL
     });
 
-    // finalize on server (store metrics + upload snapshot)
+    // finalize on server (store metrics + upload snapshot) and capture report_no if returned
     try {
       if (trackId) {
         const resp = await fetch("/api/tracks/finish", {
@@ -339,14 +358,34 @@ export default function App() {
           }),
         });
         const js = await resp.json().catch(() => ({}));
-        if (resp.ok && js?.snapshot_url) {
-          setSummary((s) => ({ ...s, snapshotUrl: js.snapshot_url }));
+        if (resp.ok) {
+          if (js?.snapshot_url) {
+            setSummary((s) => ({ ...s, snapshotUrl: js.snapshot_url }));
+          }
+          if (js?.report_no) {
+            setSummary((s) => ({ ...s, report_no: js.report_no }));
+            setLatestReportNo(js.report_no);
+          }
         }
       }
     } catch (e) {
       console.warn("finish error:", e);
     }
   };
+
+  // If we still don't have a report number, try fetching it by trackId
+  useEffect(() => {
+    (async () => {
+      if (trackId && !latestReportNo) {
+        const { data, error } = await supabase
+          .from("tracks")
+          .select("report_no")
+          .eq("id", trackId)
+          .maybeSingle();
+        if (!error && data?.report_no) setLatestReportNo(data.report_no);
+      }
+    })();
+  }, [trackId, latestReportNo]);
 
   const center = useMemo(
     () =>
@@ -357,8 +396,14 @@ export default function App() {
   );
 
   const deviceId = "esp-shelby-01";
+  const finalReportNo =
+    (summary && summary.report_no) ||
+    (submittedReport && submittedReport.report_no) ||
+    latestReportNo ||
+    "(pending)";
+
   const pdfProps = buildPdfProps(summary, {
-    report_no: summary?.report_no,
+    report_no: finalReportNo,
     handler: "Shelby",
     dog: "Rogue",
     email: "TestPD@TestCity.Gov",
@@ -625,6 +670,7 @@ export default function App() {
                   setSummary(null);
                   setReportSubmitted(false);
                   setSubmittedReport(null);
+                  setLatestReportNo("");
                 }}
                 style={{ padding: "6px 10px", borderRadius: 10 }}
               >
@@ -646,6 +692,7 @@ export default function App() {
                 }}
               >
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
+                <div>Track #: {finalReportNo}</div>
                 <div>Distance: {prettyDistance(summary.distance)}</div>
                 <div>Duration: {prettyDuration(summary.durationMs)}</div>
                 <div>Pace: {summary.pace_label ?? "—"}</div>
@@ -692,12 +739,13 @@ export default function App() {
           <div style={{ marginTop: 8 }}>
             <ReportForm
               defaultTrackId={trackId}
-              report_no={summary?.report_no}
+              report_no={finalReportNo}
               snapshotUrl={summary?.snapshotUrl || summary?.snapshotDataUrl || ""}
               device_id={"esp-shelby-01"}
               onSubmitted={(info) => {
                 setReportSubmitted(true);
                 setSubmittedReport(info);
+                if (info?.report_no) setLatestReportNo(info.report_no);
               }}
             />
           </div>
@@ -718,8 +766,16 @@ export default function App() {
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {/* Download PDF */}
               <PDFDownloadLink
-                document={<ReportPDF {...pdfProps} />}
-                fileName={`k9_report_${pdfProps.reportNo || "latest"}.pdf`}
+                document={<ReportPDF {...buildPdfProps(summary, {
+                  report_no: finalReportNo,
+                  handler: "Shelby",
+                  dog: "Rogue",
+                  email: "TestPD@TestCity.Gov",
+                  device_id: "esp-shelby-01",
+                  track_id: trackId || "",
+                  notes: submittedReport?.notes || "",
+                })} />}
+                fileName={`k9_report_${finalReportNo || "latest"}.pdf`}
               >
                 {({ loading }) => (
                   <button
@@ -740,7 +796,19 @@ export default function App() {
                 onClick={async () => {
                   const w = window.open("", "_blank");
                   try {
-                    const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
+                    const blob = await pdf(
+                      <ReportPDF
+                        {...buildPdfProps(summary, {
+                          report_no: finalReportNo,
+                          handler: "Shelby",
+                          dog: "Rogue",
+                          email: "TestPD@TestCity.Gov",
+                          device_id: "esp-shelby-01",
+                          track_id: trackId || "",
+                          notes: submittedReport?.notes || "",
+                        })}
+                      />
+                    ).toBlob();
                     const url = URL.createObjectURL(blob);
                     if (w) {
                       w.location.href = url;
