@@ -1,61 +1,58 @@
-exports.config = { runtime: "nodejs" }; // ensure Node runtime
+// api/tracks/create.js
+const { createClient } = require("@supabase/supabase-js");
 
-const crypto = require("crypto");
-const { getSupabase } = require("./_supabase");
-
-async function readJson(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  if (chunks.length === 0) return {};
-  const s = Buffer.concat(chunks).toString("utf8");
-  try { return JSON.parse(s); } catch { throw new Error("Invalid JSON body"); }
+function need(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Content-Type", "application/json");
   if (req.method !== "POST") {
-    res.statusCode = 405; return res.end(JSON.stringify({ error: "Method not allowed" }));
+    res.statusCode = 405;
+    return res.json({ error: "Method not allowed" });
   }
 
   try {
-    const body = await readJson(req);
-    const deviceId = body.deviceId || null;
-    const topic = body.topic || null;
-    const startedAt = body.startedAt || new Date().toISOString();
-    const shareCode = crypto.randomBytes(6).toString("base64url"); // short share token
+    const supabase = createClient(need("SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE"));
 
-    const supabase = getSupabase();
+    // Expect body like: { device_id, topic, is_public }
+    const { device_id, topic, is_public = true } = req.body || {};
+
+    // Mint the monthly report number first (YYYY-MM-XXX)
+    const { data: nextNo, error: rpcErr } = await supabase.rpc("next_track_report_no");
+    if (rpcErr) throw rpcErr;
+
+    // Optional: generate a short share code (6–8 chars)
+    const share_code = Math.random().toString(36).slice(2, 8).toUpperCase();
+
+    const started_at = new Date().toISOString();
+
     const { data, error } = await supabase
       .from("tracks")
-      .insert({
-        device_id: deviceId,
+      .insert([{
+        device_id,
         topic,
-        started_at: startedAt,
-        share_code: shareCode,
-        is_public: true,
-      })
-      .select("id, share_code")
+        started_at,
+        is_public,
+        share_code,
+        report_no: nextNo,  // <-- assign here on create
+      }])
+      .select()
       .single();
 
-    if (error) {
-      // Common helpful hints
-      let hint = "";
-      if (String(error.message).includes("relation")) {
-        hint = 'Table "tracks" not found. Create it in Supabase.';
-      } else if (String(error.message).includes("permission")) {
-        hint = "Permission denied: ensure you used the SERVICE ROLE key in SUPABASE_SERVICE_ROLE.";
-      }
-      console.error("tracks/create error:", error);
-      res.statusCode = 500;
-      return res.end(JSON.stringify({ error: error.message, hint }));
-    }
+    if (error) throw error;
 
-    res.statusCode = 200;
-    return res.end(JSON.stringify({ id: data.id, shareCode: data.share_code }));
+    res.status(200).json({
+      ok: true,
+      id: data.id,
+      report_no: data.report_no,
+      share_code: data.share_code,
+      started_at: data.started_at,
+    });
   } catch (e) {
-    console.error("tracks/create exception:", e);
-    res.statusCode = 500;
-    return res.end(JSON.stringify({ error: String(e.message || e) }));
+    res.status(500).json({ error: String(e.message || e) });
   }
 };
+
 
