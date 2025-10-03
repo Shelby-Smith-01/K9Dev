@@ -5,6 +5,8 @@ import "leaflet/dist/leaflet.css";
 import * as htmlToImage from "html-to-image";
 import ReportForm from "./components/ReportForm";
 import { supabase } from "./lib/supabaseClient";
+import LoginCard from "./components/LoginCard";
+
 
 /* ======================
    Utilities
