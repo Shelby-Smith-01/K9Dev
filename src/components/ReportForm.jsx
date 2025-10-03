@@ -52,24 +52,38 @@ function prettyDuration(ms) {
   return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
 }
 
+const isUUID = (s) =>
+  typeof s === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+
+async function resolveReportNo(reportNo) {
+  const u = new URL("/api/tracks/resolve", window.location.origin);
+  u.searchParams.set("report_no", reportNo);
+  const r = await fetch(u.toString()).then((res) => res.json());
+  if (r?.id) return r.id;
+  throw new Error(r?.error || "Report # not found");
+}
+
 /**
- * Props you can pass from App.jsx (all optional except handler/dog entered by user):
- * - defaultTrackId: string (prefills the Track ID field)
- * - snapshotUrl: string (map image to preview and attach)
+ * Props you can pass from App.jsx:
+ * - defaultTrackId: string (UUID) – pre-filled track id
+ * - report_no: string (YYYY-MM-XXX) – display only
+ * - snapshotUrl: string – map image to preview/attach
  * - distance_m, duration_ms: numbers
  * - pace_min_per_km, avg_speed_kmh: strings
  * - weather: { temperature, windspeed }
- * - report_no: "YYYY-MM-XXX" (display only)
+ * - device_id: string – required by API to assert membership (e.g. "esp-shelby-01")
  */
 export default function ReportForm({
   defaultTrackId,
+  report_no,
   snapshotUrl,
   distance_m,
   duration_ms,
   pace_min_per_km,
   avg_speed_kmh,
   weather,
-  report_no,
+  device_id, // IMPORTANT for API auth checks
 }) {
   const [form, setForm] = useState({
     handler: "",
@@ -83,6 +97,7 @@ export default function ReportForm({
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [hint, setHint] = useState("");
 
   const onChange = (e) => setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
 
@@ -103,29 +118,50 @@ export default function ReportForm({
       email: form.email || "",
       track_id: form.track_id || "",
       notes: form.notes || "",
-      // The API will store both attachment_url (file if uploaded) and map_snapshot_url (if provided)
       will_attach: file ? "uploaded file" : (includeSnapshot && snapshotUrl ? "map snapshot" : "none"),
     }),
     [form, file, includeSnapshot, snapshotUrl]
   );
+
+  async function getSafeTrackId(input) {
+    if (!input) return null;
+    // If it's a real UUID, use it.
+    if (isUUID(input)) return input;
+    // Otherwise, try to treat it as a Report # and resolve to a UUID.
+    setHint("Resolving Report #…");
+    const id = await resolveReportNo(input.trim());
+    setHint("Report # resolved to Track ID.");
+    return id;
+  }
 
   const onSubmit = async (e) => {
     e.preventDefault();
     setSending(true);
     setError("");
     setResult(null);
+    setHint("");
 
     try {
-      // 1) A file overrides the snapshot as the primary attachment
+      if (!device_id) throw new Error("Missing device_id (pass as prop to ReportForm)");
+
+      // 1) Resolve track id: accept UUID or Report #
+      const safeTrackId = await getSafeTrackId(form.track_id);
+
+      // 2) A file overrides the snapshot as the primary attachment
       let attachment_url = null;
       if (file) {
         attachment_url = await maybeUploadFile();
       }
 
       const body = {
-        ...form,
-        attachment_url,                                    // may be null
-        map_snapshot_url: includeSnapshot ? snapshotUrl || null : null, // stored in a dedicated column
+        handler: form.handler,
+        dog: form.dog,
+        email: form.email || null,
+        track_id: safeTrackId, // only UUID or null
+        notes: form.notes || null,
+        attachment_url, // may be null
+        map_snapshot_url: includeSnapshot ? (snapshotUrl || null) : null,
+        device_id,
       };
 
       const resp = await fetch("/api/forms/report", {
@@ -140,6 +176,7 @@ export default function ReportForm({
       // Reset form (keep track_id prefill)
       setForm({ handler: "", dog: "", email: "", track_id: defaultTrackId || "", notes: "" });
       setFile(null);
+      setHint("");
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -220,9 +257,17 @@ export default function ReportForm({
             Email
             <input name="email" type="email" value={form.email} onChange={onChange} style={inputStyle} placeholder="handler@agency.gov" />
           </label>
+
           <label style={{ fontSize: 12, color: "#374151" }}>
-            Track ID
-            <input name="track_id" value={form.track_id} onChange={onChange} style={inputStyle} placeholder="links this report to a track" />
+            Track ID or Report #
+            <input
+              name="track_id"
+              value={form.track_id}
+              onChange={(e)=>{ setHint(""); onChange(e); }}
+              style={inputStyle}
+              placeholder="Paste Track UUID or 2025-10-001"
+            />
+            {hint && <div style={{ fontSize: 11, color: "#2563eb", marginTop: 4 }}>{hint}</div>}
           </label>
         </div>
 
@@ -243,7 +288,7 @@ export default function ReportForm({
           </div>
         </label>
 
-        <button disabled={sending} style={{ padding: "8px 12px", borderRadius: 10, border: "none", background: "#111827", color: "#fff", cursor: "pointer" }}>
+        <button disabled={sending || !device_id} style={{ padding: "8px 12px", borderRadius: 10, border: "none", background: "#111827", color: "#fff", cursor: "pointer" }}>
           {sending ? "Submitting…" : "Submit"}
         </button>
 
@@ -259,5 +304,6 @@ export default function ReportForm({
     </div>
   );
 }
+
 
 
