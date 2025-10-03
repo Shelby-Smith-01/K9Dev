@@ -1,46 +1,90 @@
 // src/components/ReportPDF.jsx
 import React from "react";
-import { Document, Page, Text, View, Image, StyleSheet } from "@react-pdf/renderer";
+import {
+  Document,
+  Page,
+  Text,
+  Image,
+  View,
+  StyleSheet,
+} from "@react-pdf/renderer";
 
+// A4 page styles
 const styles = StyleSheet.create({
-  page: { padding: 24, fontSize: 11 },
+  page: { padding: 24, fontSize: 11, fontFamily: "Helvetica" },
   header: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
   logo: { width: 48, height: 48, marginRight: 12 },
-  titleWrap: { flexGrow: 1 },
+  titleWrap: { flex: 1 },
   title: { fontSize: 16, fontWeight: 700 },
-  sub: { fontSize: 11, color: "#555" },
-  section: { marginTop: 12, paddingTop: 8, borderTop: "1 solid #ddd" },
-  row: { flexDirection: "row", gap: 12, marginTop: 6, flexWrap: "wrap" },
-  label: { width: 110, color: "#555" },
-  value: { flexGrow: 1 },
-  snapshot: { width: "100%", marginTop: 10, border: "1 solid #ddd" },
+  sub: { fontSize: 10, color: "#555" },
+
+  section: { marginTop: 10 },
+  h2: { fontSize: 12, fontWeight: 700, marginBottom: 6 },
+  row: { flexDirection: "row", gap: 16, marginBottom: 6, flexWrap: "wrap" },
+  cell: { marginRight: 16, marginBottom: 4 },
+
+  // Snapshot
+  shotWrap: { marginTop: 8, border: 1, borderColor: "#ddd" },
+  shot: { width: "100%", height: 380, objectFit: "cover" },
+  shotCap: { fontSize: 9, color: "#444", marginTop: 4, textAlign: "center" },
+
+  footer: { marginTop: 16, fontSize: 9, color: "#777" },
 });
 
-export default function ReportPDF({
-  departmentName = "Test PD",
-  logoUrl = "https://flagcdn.com/w320/us.png", // placeholder flag
-  reportNo,
-  createdAt,
-  handler,
-  dog,
-  email,
-  deviceId,
-  trackId,
-  distance_m,
-  duration_ms,
-  pace_label,
-  avg_speed_label,
-  weather,            // e.g. { temperature, windspeed }
-  snapshotUrl,        // PNG from your track snapshot
-  notes,
-}) {
-  const prettyDistance = (m) => (m < 1000 ? `${m.toFixed(1)} m` : `${(m/1000).toFixed(2)} km`);
-  const prettyDuration = (ms) => {
-    const s = Math.floor(ms/1000);
-    const hh = Math.floor(s/3600); const mm = Math.floor((s%3600)/60); const ss = s%60;
-    const pad = (n)=>String(n).padStart(2,"0");
-    return hh>0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
-  };
+function Line({ label, value }) {
+  return (
+    <View style={styles.cell}>
+      <Text>
+        <Text style={{ fontWeight: 700 }}>{label}: </Text>
+        <Text>{value ?? "—"}</Text>
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Props expected (from App.jsx buildPdfProps):
+ * {
+ *  departmentName, logoUrl, reportNo, createdAt,
+ *  handler, dog, email, deviceId, trackId,
+ *  distance_m, duration_ms, pace_label, avg_speed_label,
+ *  weather, snapshotUrl, notes
+ * }
+ */
+export default function ReportPDF(props) {
+  const {
+    departmentName = "Test PD",
+    logoUrl = "https://flagcdn.com/w320/us.png",
+    reportNo,
+    createdAt,
+    handler,
+    dog,
+    email,
+    deviceId,
+    trackId,
+    distance_m,
+    duration_ms,
+    pace_label,
+    avg_speed_label,
+    weather,
+    snapshotUrl, // data: URL or public https://... URL
+    notes,
+  } = props || {};
+
+  const km = distance_m ? (distance_m / 1000).toFixed(2) : "0.00";
+  const durStr = (() => {
+    const s = Math.floor((duration_ms || 0) / 1000);
+    const hh = Math.floor(s / 3600);
+    const mm = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    const pad = (n) => n.toString().padStart(2, "0");
+    return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
+  })();
+
+  const weatherStr =
+    weather && typeof weather === "object"
+      ? `${weather.temperature}°C, wind ${weather.windspeed} km/h`
+      : "—";
 
   return (
     <Document>
@@ -49,51 +93,69 @@ export default function ReportPDF({
         <View style={styles.header}>
           {logoUrl ? <Image src={logoUrl} style={styles.logo} /> : null}
           <View style={styles.titleWrap}>
-            <Text style={styles.title}>{departmentName} — K9 Track Report</Text>
+            <Text style={styles.title}>{departmentName} – K9 Track Report</Text>
             <Text style={styles.sub}>
-              {reportNo ? `Report #: ${reportNo}` : ""} {createdAt ? `   •   ${new Date(createdAt).toLocaleString()}` : ""}
+              {reportNo ? `Report #: ${reportNo}   ` : ""}
+              {createdAt ? `Created: ${new Date(createdAt).toLocaleString()}` : ""}
             </Text>
           </View>
         </View>
 
-        {/* Details */}
+        {/* Summary */}
         <View style={styles.section}>
-          <View style={styles.row}><Text style={styles.label}>Handler</Text><Text style={styles.value}>{handler || "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>K9</Text><Text style={styles.value}>{dog || "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>Email</Text><Text style={styles.value}>{email || "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>Device</Text><Text style={styles.value}>{deviceId || "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>Track ID</Text><Text style={styles.value}>{trackId || "—"}</Text></View>
+          <Text style={styles.h2}>Summary</Text>
+          <View style={styles.row}>
+            <Line label="Handler" value={handler} />
+            <Line label="K9" value={dog} />
+            <Line label="Email" value={email} />
+          </View>
+          <View style={styles.row}>
+            <Line label="Device" value={deviceId} />
+            <Line label="Track ID" value={trackId} />
+          </View>
+          <View style={styles.row}>
+            <Line label="Distance" value={`${km} km`} />
+            <Line label="Duration" value={durStr} />
+            <Line label="Pace" value={pace_label || "—"} />
+            <Line label="Avg Speed" value={avg_speed_label || "—"} />
+          </View>
+          <View style={styles.row}>
+            <Line label="Weather" value={weatherStr} />
+          </View>
         </View>
 
-        {/* Stats */}
+        {/* Snapshot */}
         <View style={styles.section}>
-          <View style={styles.row}><Text style={styles.label}>Distance</Text><Text style={styles.value}>{Number.isFinite(distance_m) ? prettyDistance(distance_m) : "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>Duration</Text><Text style={styles.value}>{Number.isFinite(duration_ms) ? prettyDuration(duration_ms) : "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>Pace</Text><Text style={styles.value}>{pace_label || "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>Avg Speed</Text><Text style={styles.value}>{avg_speed_label || "—"}</Text></View>
-          <View style={styles.row}><Text style={styles.label}>Weather</Text>
-            <Text style={styles.value}>
-              {weather ? `${weather.temperature}°C, wind ${weather.windspeed} km/h` : "—"}
-            </Text>
-          </View>
+          <Text style={styles.h2}>Map Snapshot</Text>
+          {snapshotUrl ? (
+            <>
+              {/* 
+                @react-pdf/renderer supports both data: URLs and remote HTTPS URLs.
+                Keep the container bordered for a clean print look.
+              */}
+              <View style={styles.shotWrap}>
+                <Image src={snapshotUrl} style={styles.shot} />
+              </View>
+              <Text style={styles.shotCap}>
+                Live map snapshot captured at stop time with full track polyline and stats.
+              </Text>
+            </>
+          ) : (
+            <Text>Snapshot unavailable.</Text>
+          )}
         </View>
 
         {/* Notes */}
-        {notes ? (
-          <View style={styles.section}>
-            <Text>Notes</Text>
-            <Text>{notes}</Text>
-          </View>
-        ) : null}
+        <View style={styles.section}>
+          <Text style={styles.h2}>Notes</Text>
+          <Text>{notes || "—"}</Text>
+        </View>
 
-        {/* Snapshot */}
-        {snapshotUrl ? (
-          <View style={styles.section}>
-            <Text>Map Snapshot</Text>
-            <Image src={snapshotUrl} style={styles.snapshot} />
-          </View>
-        ) : null}
+        <Text style={styles.footer}>
+          Generated by K9 Live Tracker • {new Date().toLocaleString()}
+        </Text>
       </Page>
     </Document>
   );
 }
+
