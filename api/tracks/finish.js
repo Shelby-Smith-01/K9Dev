@@ -1,77 +1,102 @@
-exports.config = { runtime: "nodejs" };
+// api/tracks/finish.js
+const { createClient } = require("@supabase/supabase-js");
 
-const { getSupabase } = require("./_supabase");
-
-async function readJson(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  if (chunks.length === 0) return {};
-  const s = Buffer.concat(chunks).toString("utf8");
-  try { return JSON.parse(s); } catch { throw new Error("Invalid JSON body"); }
+function need(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
 
-function computeStats(distance_m, duration_ms) {
-  const d = Number(distance_m) || 0;
-  const ms = Number(duration_ms) || 0;
-  const km = d / 1000;
-  const hours = ms / 3_600_000;
-  const avg_speed_kmh = hours > 0 ? km / hours : null;
-  const pace_min_per_km = km > 0 ? (ms / 60_000) / km : null;
-  return { avg_speed_kmh, pace_min_per_km };
+function dataUrlToBuffer(dataUrl) {
+  // data:image/png;base64,AAAA...
+  const m = /^data:(.+);base64,(.*)$/.exec(dataUrl || "");
+  if (!m) return null;
+  return {
+    contentType: m[1],
+    buffer: Buffer.from(m[2], "base64"),
+  };
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Content-Type", "application/json");
   if (req.method !== "POST") {
-    res.statusCode = 405; return res.end(JSON.stringify({ error: "Method not allowed" }));
+    res.statusCode = 405;
+    return res.json({ error: "Method not allowed" });
   }
 
   try {
-    const body = await readJson(req);
+    const supabase = createClient(need("SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE"));
+
     const {
-      id,
-      endedAt = new Date().toISOString(),
-      distance_m = 0,
-      duration_ms = 0,
-      weather = null,
-      elevation = null,
-      points = [],
-    } = body || {};
+      id,                    // track id (required)
+      distance_m,
+      duration_ms,
+      pace_min_per_km,
+      avg_speed_kmh,
+      weather,
+      elevation,
+      points,                // breadcrumb array
+      snapshotDataUrl        // OPTIONAL data URL (image/png, base64)
+    } = req.body || {};
 
     if (!id) {
-      res.statusCode = 400; return res.end(JSON.stringify({ error: "Missing id" }));
+      res.statusCode = 400;
+      return res.json({ error: "Missing track id" });
     }
 
-    const { avg_speed_kmh, pace_min_per_km } = computeStats(distance_m, duration_ms);
+    // Optional: upload snapshot if provided as data URL
+    let snapshot_url = null;
+    if (snapshotDataUrl) {
+      const parsed = dataUrlToBuffer(snapshotDataUrl);
+      if (parsed && parsed.buffer?.length) {
+        const key = `tracks/${id}_${Date.now()}.png`;
+        const { error: upErr } = await supabase
+          .storage
+          .from("snapshots")
+          .upload(key, parsed.buffer, {
+            upsert: false,
+            contentType: parsed.contentType || "image/png",
+          });
+        if (upErr) throw upErr;
+        const { data: pub } = supabase.storage.from("snapshots").getPublicUrl(key);
+        snapshot_url = pub?.publicUrl || null;
+      }
+    }
 
-    const supabase = getSupabase();
-    const { error } = await supabase
+    // If no report_no yet, mint one atomically (YYYY-MM-XX)
+    const { data: trackRow, error: fetchErr } = await supabase
+      .from("tracks")
+      .select("report_no")
+      .eq("id", id)
+      .single();
+    if (fetchErr) throw fetchErr;
+
+    let report_no = trackRow?.report_no || null;
+    if (!report_no) {
+      const { data: nextNo, error: rpcErr } = await supabase.rpc("next_track_report_no");
+      if (rpcErr) throw rpcErr;
+      report_no = nextNo;
+    }
+
+    // Persist the summary
+    const { error: upErr2 } = await supabase
       .from("tracks")
       .update({
-        ended_at: endedAt,
+        ended_at: new Date().toISOString(),
         distance_m,
         duration_ms,
-        avg_speed_kmh,
         pace_min_per_km,
+        avg_speed_kmh,
         weather,
         elevation,
         points,
+        snapshot_url: snapshot_url || null,
+        report_no,
       })
       .eq("id", id);
+    if (upErr2) throw upErr2;
 
-    if (error) {
-      console.error("tracks/finish error:", error);
-      res.statusCode = 500;
-      return res.end(JSON.stringify({ error: error.message }));
-    }
-
-    res.statusCode = 200;
-    return res.end(JSON.stringify({ ok: true }));
+    res.status(200).json({ ok: true, id, report_no, snapshot_url });
   } catch (e) {
-    console.error("tracks/finish exception:", e);
-    res.statusCode = 500;
-    return res.end(JSON.stringify({ error: String(e.message || e) }));
+    res.status(500).json({ error: String(e.message || e) });
   }
 };
-
-
