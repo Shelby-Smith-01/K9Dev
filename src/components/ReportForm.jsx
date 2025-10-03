@@ -60,7 +60,7 @@ export default function ReportForm({
         // Include any other useful fields your parent wants:
         track_id: defaultTrackId || null,
         snapshotUrl: snapshotUrl || null,
-        report_no,
+        report_no: js.report_no || null, // <— pass it up if API returns it
         device_id,
       });
 
