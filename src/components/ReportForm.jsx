@@ -5,6 +5,7 @@ export default function ReportForm({
   report_no = null,       // optional display
   snapshotUrl = null,     // optional display
   device_id = null,       // optional display
+  onSubmitted = () => {}, // <-- NEW: parent callback fired on success
 }) {
   const [handler, setHandler] = useState("");
   const [dog, setDog] = useState("");
@@ -35,6 +36,9 @@ export default function ReportForm({
           // If you want branding saved with the entry and you have columns for these:
           // department_name: "Test PD",
           // logo_url: "https://example.com/flag.png",
+          // You can also pass report_no/device_id to store alongside reports if desired:
+          // report_no,
+          // device_id,
         }),
       });
 
@@ -42,7 +46,27 @@ export default function ReportForm({
       if (!resp.ok || js.error) {
         throw new Error(js.error || `HTTP ${resp.status}`);
       }
+
       setResult(js);
+
+      // ✅ FIRE THE CALLBACK *IMMEDIATELY AFTER* SUCCESS:
+      // Prefer returning the new report id if your API sends it back (js.id).
+      onSubmitted({
+        id: js.id || null,
+        handler,
+        dog,
+        email,
+        notes,
+        // Include any other useful fields your parent wants:
+        track_id: defaultTrackId || null,
+        snapshotUrl: snapshotUrl || null,
+        report_no,
+        device_id,
+      });
+
+      // (Optional) clear the form after notifying parent:
+      // setHandler(""); setDog(""); setEmail(""); setNotes(""); setAttachmentUrl("");
+
     } catch (e) {
       console.error("report submit error:", e);
       setError(e.message || String(e));
