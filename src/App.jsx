@@ -24,8 +24,10 @@ const haversine = (a, b) => {
   const d = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
   return R * d;
 };
+
 const prettyDistance = (m) =>
   !Number.isFinite(m) ? "—" : m < 1000 ? `${m.toFixed(1)} m` : `${(m / 1000).toFixed(2)} km`;
+
 const prettyDuration = (ms) => {
   if (!Number.isFinite(ms)) return "—";
   const s = Math.floor(ms / 1000);
@@ -35,6 +37,7 @@ const prettyDuration = (ms) => {
   const pad = (n) => n.toString().padStart(2, "0");
   return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`;
 };
+
 function useInterval(cb, delay) {
   const ref = useRef(cb);
   useEffect(() => { ref.current = cb; }, [cb]);
@@ -61,7 +64,7 @@ function computeMetrics(distanceM, durationMs) {
 }
 
 /* =========================
-   SSE bridge to /api/stream (uses onMessage ref)
+   SSE bridge to /api/stream
 ========================= */
 const defaultConn = {
   host: "broker.emqx.io",
@@ -69,12 +72,14 @@ const defaultConn = {
   topic: "devices/esp-shelby-01/telemetry",
   ssl: true,
 };
+
 function useSSE(conn, onMessage) {
   const [status, setStatus] = useState("idle");
   const [msgs, setMsgs] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const esRef = useRef(null);
 
+  // keep latest handler without re-opening SSE
   const onMsgRef = useRef(onMessage);
   useEffect(() => { onMsgRef.current = onMessage; }, [onMessage]);
 
@@ -158,7 +163,7 @@ function Recenter({ lat, lon }) {
 }
 
 /* =========================
-   Build PDF props
+   PDF prop builder
 ========================= */
 function buildPdfProps(summary, extras = {}) {
   const {
@@ -196,6 +201,7 @@ function buildPdfProps(summary, extras = {}) {
    Main App
 ========================= */
 export default function App() {
+  // viewer mode hides controls: ?viewer=1
   const isViewer =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("viewer") === "1";
@@ -218,6 +224,7 @@ export default function App() {
   const [latestReportNo, setLatestReportNo] = useState("");
 
   const mapShotRef = useRef(null);
+  const mapRef = useRef(null); // for fit to track
   const deviceId = "esp-shelby-01";
 
   const { status, msgs, errorMsg, connect, disconnect } = useSSE(conn, (msg) => {
@@ -237,10 +244,42 @@ export default function App() {
     }
   });
 
-  // auto connect SSE
+  // Auto-connect SSE on mount
   useEffect(() => { connect(); /* eslint-disable-next-line */ }, []);
 
+  // timer for K9 elapsed
   useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
+
+  // Fit map to full track and wait until render completes; return restorer
+  async function fitMapToTrack(pts) {
+    const map = mapRef.current;
+    if (!map || !pts || pts.length === 0) return null;
+
+    const prevCenter = map.getCenter();
+    const prevZoom = map.getZoom();
+
+    const bounds =
+      pts.length === 1
+        ? [[pts[0].lat, pts[0].lon], [pts[0].lat, pts[0].lon]]
+        : pts.map((p) => [p.lat, p.lon]);
+
+    map.fitBounds(bounds, { padding: [40, 40] });
+
+    await new Promise((resolve) => {
+      let done = false;
+      const onEnd = () => {
+        if (!done) {
+          done = true;
+          map.off("moveend", onEnd);
+          resolve();
+        }
+      };
+      map.once("moveend", onEnd);
+      setTimeout(onEnd, 700); // fallback
+    });
+
+    return () => map.setView(prevCenter, prevZoom, { animate: false });
+  }
 
   const startTrack = async () => {
     if (isViewer) return;
@@ -249,7 +288,7 @@ export default function App() {
     setReportSubmitted(false); setSubmittedReport(null);
     setLatestReportNo(""); setTrackId(null);
 
-    // CREATE the track in your API so we get id + report_no NOW
+    // create the track record now to get id + report_no
     try {
       const resp = await fetch("/api/tracks/create", {
         method: "POST",
@@ -316,15 +355,50 @@ export default function App() {
     const { avg_speed_kmh, pace_min_per_km, pace_label, avg_speed_label } =
       computeMetrics(dist, durMs);
 
+    // Snapshot (auto-fit → capture → restore). Hardened for CORS with fallback.
     let snapshotDataUrl = null;
+    let restoreView = null;
+
     try {
+      if (pts.length) restoreView = await fitMapToTrack(pts);
+
       if (mapShotRef.current) {
+        // first attempt: full map + tiles
         snapshotDataUrl = await htmlToImage.toPng(mapShotRef.current, {
           cacheBust: true,
+          useCORS: true,
+          imageTimeout: 7000,
           pixelRatio: 2,
+          imagePlaceholder:
+            "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8' fill='%23f1f5f9'/></svg>",
         });
       }
-    } catch (e) { console.warn("snapshot failed", e); }
+    } catch (e) {
+      console.warn("snapshot with tiles failed:", e);
+    }
+
+    if (!snapshotDataUrl && mapShotRef.current) {
+      // fallback: snapshot overlays only (hide raster tiles)
+      const tileImgs = mapShotRef.current.querySelectorAll(".leaflet-tile-pane img");
+      const prev = [];
+      tileImgs.forEach((img) => { prev.push(img.style.opacity); img.style.opacity = "0"; });
+
+      try {
+        snapshotDataUrl = await htmlToImage.toPng(mapShotRef.current, {
+          cacheBust: true,
+          useCORS: true,
+          imageTimeout: 5000,
+          pixelRatio: 2,
+          backgroundColor: "#f8fafc",
+        });
+      } catch (e2) {
+        console.warn("fallback snapshot failed:", e2);
+      } finally {
+        tileImgs.forEach((img, i) => (img.style.opacity = prev[i] ?? ""));
+      }
+    }
+
+    try { if (restoreView) restoreView(); } catch {}
 
     setSummary({
       distance: dist,
@@ -339,6 +413,7 @@ export default function App() {
       snapshotDataUrl,
     });
 
+    // persist to backend
     try {
       if (trackId) {
         const resp = await fetch("/api/tracks/finish", {
@@ -372,7 +447,7 @@ export default function App() {
     }
   };
 
-  // Backfill report_no by trackId if needed
+  // Backfill report_no if API didn't return it immediately
   useEffect(() => {
     (async () => {
       if (trackId && !latestReportNo) {
@@ -635,6 +710,7 @@ export default function App() {
       {/* Right: Map (snapshot target) */}
       <div ref={mapShotRef} style={{ height: "100vh", width: "100%" }}>
         <MapContainer
+          whenCreated={(m) => (mapRef.current = m)}
           center={useMemo(
             () =>
               last && Number.isFinite(last.lat) && Number.isFinite(last.lon)
@@ -645,7 +721,11 @@ export default function App() {
           zoom={13}
           style={{ height: "100%", width: "100%" }}
         >
-          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+          <TileLayer
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution="&copy; OpenStreetMap"
+            crossOrigin="anonymous"
+          />
           {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
             <Recenter lat={last.lat} lon={last.lon} />
           )}
@@ -660,6 +740,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 
