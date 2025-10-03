@@ -66,6 +66,7 @@ const defaultConn = {
 /* =========== SSE Bridge (MQTT -> SSE) =========== */
 function useSSE(conn, onMessage, onDiag) {
   const [status, setStatus] = useState("idle");
+  theStateHack(); // keep esbuild happy on Vercel's analyzer
   const [msgs, setMsgs] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const [lastPayload, setLastPayload] = useState("");
@@ -75,6 +76,8 @@ function useSSE(conn, onMessage, onDiag) {
   const diagRef = useRef(onDiag);
   useEffect(() => { msgRef.current = onMessage; }, [onMessage]);
   useEffect(() => { diagRef.current = onDiag; }, [onDiag]);
+
+  function theStateHack() {} // no-op
 
   const connect = () => {
     try { esRef.current?.close(); } catch {}
@@ -219,11 +222,15 @@ export default function App() {
   const [trackId, setTrackId] = useState(null);
   const [summary, setSummary] = useState(null);
 
+  // NEW: Gate PDF by report submission
+  const [reportSubmitted, setReportSubmitted] = useState(false);
+  const [submittedReport, setSubmittedReport] = useState(null); // {id, handler, dog, email, notes}
+
   // Supabase auth
   const [user, setUser] = useState(null);
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data?.user || null));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) => {
       setUser(session?.user || null);
     });
     return () => sub?.subscription?.unsubscribe();
@@ -237,7 +244,30 @@ export default function App() {
     });
   }
 
-  // Seed default report draft for autofill (Shelby, Rogue, TestPD@TestCity.Gov)
+  // === Auth UI helpers ===
+  const [authEmail, setAuthEmail] = useState(() => {
+    try { return localStorage.getItem("k9.authEmail") || "TestPD@TestCity.Gov"; } catch { return "TestPD@TestCity.Gov"; }
+  });
+  const [sendingLink, setSendingLink] = useState(false);
+  async function sendMagicLink() {
+    try {
+      setSendingLink(true);
+      const { error } = await supabase.auth.signInWithOtp({
+        email: authEmail,
+        options: { emailRedirectTo: window.location.origin },
+      });
+      if (error) throw error;
+      try { localStorage.setItem("k9.authEmail", authEmail); } catch {}
+      alert("Check your email for a sign-in link.");
+    } catch (e) {
+      alert(e.message || String(e));
+    } finally {
+      setSendingLink(false);
+    }
+  }
+  async function signOut() { await supabase.auth.signOut(); }
+
+  // Seed default report draft (Shelby, Rogue, TestPD@TestCity.Gov)
   useEffect(() => {
     try {
       const existing = JSON.parse(localStorage.getItem("k9.reportDraft") || "{}");
@@ -358,8 +388,11 @@ export default function App() {
   async function captureSnapshot() {
     const node = document.getElementById("map-capture-root");
     if (!node) return null;
-    try { return await htmlToImage.toPng(node, { cacheBust: true, pixelRatio: 2 }); }
-    catch { return null; }
+    try {
+      return await htmlToImage.toPng(node, { cacheBust: true, pixelRatio: 2 });
+    } catch {
+      return null;
+    }
   }
 
   async function startTrack() {
@@ -374,6 +407,8 @@ export default function App() {
       if (!r.ok) throw new Error(r.error || "create failed");
       setTrackId(r.id);
       setSummary(null);
+      setReportSubmitted(false);
+      setSubmittedReport(null);
       setPoints([]); setDistance(0);
       setStartAt(Date.now()); setElapsed(0);
       setTracking(true);
@@ -413,7 +448,7 @@ export default function App() {
         }
       } catch {}
 
-      // numeric pace (min/km) + avg speed (km/h)
+      // numeric pace + avg speed
       const paceNum = (dist > 0 && durMs > 0) ? Number(((durMs / 60000) / (dist / 1000)).toFixed(3)) : null;
       let paceLabel = "—";
       if (paceNum != null) {
@@ -452,8 +487,8 @@ export default function App() {
         weather,
         elevation: elevationStats,
         points,
-        snapshotUrl: resp.snapshot_url || null,       // uploaded URL
-        snapshotDataUrl: snapshotDataUrl || null,     // local fallback
+        snapshotUrl: resp.snapshot_url || null,
+        snapshotDataUrl: snapshotDataUrl || null,
         report_no: resp.report_no || null,
         paceMinPerKm: paceLabel,
         avgSpeedKmh:  avgLabel,
@@ -461,6 +496,7 @@ export default function App() {
       });
 
       setStartAt(null);
+      // NOTE: reportSubmitted stays false until ReportForm calls onSubmitted(...)
     } catch (e) { alert(e.message || String(e)); }
   }
 
@@ -468,12 +504,40 @@ export default function App() {
     setTracking(false);
     setPoints([]); setDistance(0); setElapsed(0); setStartAt(null);
     setSummary(null);
+    setReportSubmitted(false);
+    setSubmittedReport(null);
   }
 
   const center = useMemo(() => {
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
     return [30, -97];
   }, [last]);
+
+  // Build PDF props from submitted report (preferred) or summary/draft
+  function buildPdfProps() {
+    if (!reportSubmitted || !summary) return null;
+    let draft = {};
+    try { draft = JSON.parse(localStorage.getItem("k9.reportDraft") || "{}"); } catch {}
+    const fromForm = submittedReport || {};
+    return {
+      departmentName: "Test PD",
+      logoUrl: "https://flagcdn.com/w320/us.png",
+      reportNo: summary?.report_no,
+      createdAt: new Date().toISOString(),
+      handler: fromForm.handler || draft.handler || "Shelby",
+      dog: fromForm.dog || draft.dog || "Rogue",
+      email: fromForm.email || draft.email || "TestPD@TestCity.Gov",
+      deviceId: DEVICE_ID,
+      trackId,
+      distance_m: summary?.distance ?? 0,
+      duration_ms: summary?.durationMs ?? 0,
+      pace_label: summary?.paceMinPerKm ?? "",
+      avg_speed_label: summary?.avgSpeedKmh ?? "",
+      weather: summary?.weather,
+      snapshotUrl: summary?.snapshotUrl || summary?.snapshotDataUrl || "",
+      notes: fromForm.notes ?? draft.notes ?? "",
+    };
+  }
 
   /* ================= Layout ================= */
   return (
@@ -491,12 +555,44 @@ export default function App() {
         </div>
 
         <div style={{padding:12, overflow:'auto'}}>
+          {/* Account / Auth */}
+          <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.98)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
+            <div style={{fontWeight:700, marginBottom:6}}>Account</div>
+            {user ? (
+              <>
+                <div style={{marginBottom:8}}>Signed in as <b>{user.email}</b></div>
+                <button onClick={signOut} style={{padding:'6px 10px', borderRadius:10}}>Sign out</button>
+              </>
+            ) : (
+              <>
+                <label style={{fontSize:12, display:'block', marginBottom:6}}>Email
+                  <input
+                    style={{width:'100%'}}
+                    value={authEmail}
+                    onChange={(e)=>setAuthEmail(e.target.value)}
+                    inputMode="email"
+                    placeholder="you@agency.gov"
+                  />
+                </label>
+                <button
+                  onClick={sendMagicLink}
+                  disabled={sendingLink}
+                  style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}
+                >
+                  {sendingLink ? "Sending..." : "Send sign-in link"}
+                </button>
+                <div style={{marginTop:6, color:'#64748b'}}>Open the email on this same device/browser.</div>
+              </>
+            )}
+          </div>
+
           <ConnectionPanel
             conn={conn} setConn={setConn}
-            onConnect={connectNow} onDisconnect={disconnectNow}
+            onConnect={() => { setReportSubmitted(false); connect(); }}
+            onDisconnect={disconnect}
             status={status} msgs={msgs}
             errorMsg={errorMsg} lastPayload={lastPayload}
-            autoConnect={autoConnect} setAutoConnect={setAutoConnect}
+            autoConnect={true} setAutoConnect={()=>{}}
             pointsCount={points.length}
           />
 
@@ -538,72 +634,15 @@ export default function App() {
                   <div><b>Avg Speed:</b> {summary.avgSpeedKmh || '—'}</div>
                   <div><b>Weather:</b> {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : '—'}</div>
                   <div><b>Elevation:</b> {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : '—'}</div>
-
-                  {/* Handler/K9 preview from draft or defaults */}
-                  {(() => {
-                    let draft={};
-                    try { draft = JSON.parse(localStorage.getItem("k9.reportDraft") || "{}"); } catch {}
-                    const H = draft.handler || "Shelby";
-                    const D = draft.dog || "Rogue";
-                    const E = draft.email || "TestPD@TestCity.Gov";
-                    return (
-                      <div style={{marginTop:6, fontSize:12, color:'#475569'}}>
-                        <b>Handler:</b> {H} &nbsp;·&nbsp; <b>K9:</b> {D} &nbsp;·&nbsp; <b>Email:</b> {E}
-                      </div>
-                    );
-                  })()}
-
-                  {/* ===== PDF Buttons ===== */}
-                  {(() => {
-                    let draft={};
-                    try { draft = JSON.parse(localStorage.getItem("k9.reportDraft") || "{}"); } catch {}
-                    const pdfProps = {
-                      departmentName: "Test PD",
-                      logoUrl: "https://flagcdn.com/w320/us.png",
-                      reportNo: summary?.report_no,
-                      createdAt: new Date().toISOString(),
-                      handler: draft.handler || "Shelby",
-                      dog: draft.dog || "Rogue",
-                      email: draft.email || "TestPD@TestCity.Gov",
-                      deviceId: DEVICE_ID,
-                      trackId,
-                      distance_m: summary?.distance ?? 0,
-                      duration_ms: summary?.durationMs ?? 0,
-                      pace_label: summary?.paceMinPerKm ?? "",
-                      avg_speed_label: summary?.avgSpeedKmh ?? "",
-                      weather: summary?.weather,
-                      snapshotUrl: summary?.snapshotUrl || summary?.snapshotDataUrl || "",
-                      notes: draft.notes || "",
-                    };
-                    return (
-                      <div style={{marginTop:8, display:'flex', gap:8}}>
-                        <button
-                          onClick={async () => {
-                            const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
-                            const url = URL.createObjectURL(blob);
-                            window.open(url, "_blank", "noopener,noreferrer");
-                          }}
-                          style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}
-                        >
-                          View PDF
-                        </button>
-                        <PDFDownloadLink
-                          document={<ReportPDF {...pdfProps} />}
-                          fileName={`k9_report_${summary?.report_no || trackId || "report"}.pdf`}
-                          style={{padding:'6px 10px', borderRadius:10}}
-                        >
-                          {({ loading }) => loading ? "Building…" : "Download PDF"}
-                        </PDFDownloadLink>
-                      </div>
-                    );
-                  })()}
-                  {/* ===== /PDF Buttons ===== */}
+                  <div style={{marginTop:6, color:'#64748b'}}>
+                    PDF will be available after you submit the Track Report below.
+                  </div>
                 </div>
               )}
             </div>
           )}
 
-          {/* Report form (operator only) */}
+          {/* Report form (operator only). Calls onSubmitted -> enables PDF buttons */}
           {!viewerMode && (
             <div style={{marginTop:8}}>
               <ReportForm
@@ -616,7 +655,43 @@ export default function App() {
                 avg_speed_kmh={summary?.avgSpeedKmh}
                 weather={summary?.weather}
                 device_id={DEVICE_ID}
+                onSubmitted={(info) => {        // <-- make sure your ReportForm calls this on success
+                  setReportSubmitted(true);
+                  setSubmittedReport(info || {});
+                }}
               />
+            </div>
+          )}
+
+          {/* PDF actions appear ONLY once the report has been submitted */}
+          {!viewerMode && reportSubmitted && summary && (
+            <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.98)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', fontSize:12}}>
+              <div style={{fontWeight:700, marginBottom:6}}>Report PDF</div>
+              {(() => {
+                const pdfProps = buildPdfProps();
+                if (!pdfProps) return <div>Missing report data.</div>;
+                return (
+                  <div style={{display:'flex', gap:8}}>
+                    <button
+                      onClick={async () => {
+                        const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
+                        const url = URL.createObjectURL(blob);
+                        window.open(url, "_blank", "noopener,noreferrer");
+                      }}
+                      style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}
+                    >
+                      View PDF
+                    </button>
+                    <PDFDownloadLink
+                      document={<ReportPDF {...pdfProps} />}
+                      fileName={`k9_report_${summary?.report_no || trackId || "report"}.pdf`}
+                      style={{padding:'6px 10px', borderRadius:10}}
+                    >
+                      {({ loading }) => loading ? "Building…" : "Download PDF"}
+                    </PDFDownloadLink>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -629,7 +704,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Right: Map + snapshot overlay */}
+      {/* Right: Map + snapshot overlay (everything inside this root is captured) */}
       <div id="map-capture-root" style={{flex:1, position:'relative'}}>
         {(tracking || summary) && (
           <div style={{position:'absolute', top:12, right:12, zIndex:500, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:12, padding:10, fontSize:12, boxShadow:'0 4px 16px rgba(0,0,0,.08)'}}>
@@ -648,7 +723,11 @@ export default function App() {
           if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
           return [30, -97];
         }, [last])} zoom={13} style={{height:'100%', width:'100%'}}>
-          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+          <TileLayer
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution="&copy; OpenStreetMap"
+            crossOrigin={true}
+          />
           {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
             <Recenter lat={last.lat} lon={last.lon} />
           )}
