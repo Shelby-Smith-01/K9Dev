@@ -1,5 +1,6 @@
 // src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { BrowserRouter, Routes, Route, useNavigate, useParams, Link } from "react-router-dom";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import * as htmlToImage from "html-to-image";
 import "leaflet/dist/leaflet.css";
@@ -48,9 +49,6 @@ function useInterval(cb, delay) {
   }, [delay]);
 }
 
-/* =========================
-   Metrics helper
-========================= */
 function computeMetrics(distanceM, durationMs) {
   const km = distanceM > 0 ? distanceM / 1000 : 0;
   const hours = durationMs > 0 ? durationMs / 3600000 : 0;
@@ -221,9 +219,9 @@ function buildPdfProps(summary, extras = {}) {
 }
 
 /* =========================
-   Main App
+   Live Tracker Page
 ========================= */
-export default function App() {
+function LivePage() {
   const isViewer =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("viewer") === "1";
@@ -236,11 +234,7 @@ export default function App() {
   const [startAt, setStartAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [distance, setDistance] = useState(0);
-  const [summary, setSummary] = useState(null);
   const [recenterOnUpdate, setRecenterOnUpdate] = useState(true);
-
-  const [reportSubmitted, setReportSubmitted] = useState(false);
-  const [submittedReport, setSubmittedReport] = useState(null);
 
   const [trackId, setTrackId] = useState(null);
   const [latestReportNo, setLatestReportNo] = useState("");
@@ -248,8 +242,9 @@ export default function App() {
   const mapShotRef = useRef(null);
   const mapRef = useRef(null);
   const deviceId = "esp-shelby-01";
+  const nav = useNavigate();
 
-  const { status, msgs, errorMsg, connect, disconnect } = useSSE(conn, (msg) => {
+  const { status, msgs, errorMsg, connect } = useSSE(conn, (msg) => {
     if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) {
       setLast(msg);
       if (tracking && msg.fix && isValidLatLon(msg.lat, msg.lon)) {
@@ -259,8 +254,8 @@ export default function App() {
 
           if (lastPt) {
             const seg = haversine(lastPt, newPt);
-            if (seg < 0.5) return prev; // ignore small jitter
-            if (seg > 2000) return prev; // drop teleports > 2 km
+            if (seg < 0.5) return prev;      // ignore jitter
+            if (seg > 2000) return prev;     // drop teleports
             setDistance((d) => d + seg);
           }
           return [...prev, newPt];
@@ -269,13 +264,11 @@ export default function App() {
     }
   });
 
-  // Auto-connect SSE on mount
+  // auto-connect
   useEffect(() => { connect(); /* eslint-disable-next-line */ }, []);
 
-  // timer for elapsed
   useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
 
-  // Fit to track safely and wait for render; return restorer
   async function fitMapToTrack(pts) {
     const map = mapRef.current;
     if (!map) return null;
@@ -303,7 +296,7 @@ export default function App() {
         }
       };
       map.once("moveend", onEnd);
-      setTimeout(onEnd, 800); // fallback
+      setTimeout(onEnd, 800);
     });
 
     return () => map.setView(prevCenter, prevZoom, { animate: false });
@@ -312,9 +305,7 @@ export default function App() {
   const startTrack = async () => {
     if (isViewer) return;
     setPoints([]); setDistance(0); setElapsed(0); setStartAt(Date.now());
-    setTracking(true); setSummary(null);
-    setReportSubmitted(false); setSubmittedReport(null);
-    setLatestReportNo(""); setTrackId(null);
+    setTracking(true);
 
     try {
       const resp = await fetch("/api/tracks/create", {
@@ -330,12 +321,8 @@ export default function App() {
       if (resp.ok && js?.id) {
         setTrackId(js.id);
         if (js.report_no) setLatestReportNo(js.report_no);
-      } else {
-        console.warn("create track failed:", js);
       }
-    } catch (e) {
-      console.warn("create error:", e);
-    }
+    } catch {}
   };
 
   const stopTrack = async () => {
@@ -382,13 +369,11 @@ export default function App() {
     const { avg_speed_kmh, pace_min_per_km, pace_label, avg_speed_label } =
       computeMetrics(dist, durMs);
 
-    // Snapshot (auto-fit → capture → restore) with fallback
+    // Snapshot (auto-fit → capture → restore)
     let snapshotDataUrl = null;
     let restoreView = null;
-
     try {
       if (pts.length) restoreView = await fitMapToTrack(pts);
-
       if (mapShotRef.current) {
         snapshotDataUrl = await htmlToImage.toPng(mapShotRef.current, {
           cacheBust: true,
@@ -399,45 +384,10 @@ export default function App() {
             "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8' fill='%23f1f5f9'/></svg>",
         });
       }
-    } catch (e) {
-      console.warn("snapshot with tiles failed:", e);
-    }
-
-    if (!snapshotDataUrl && mapShotRef.current) {
-      const tileImgs = mapShotRef.current.querySelectorAll(".leaflet-tile-pane img");
-      const prev = [];
-      tileImgs.forEach((img) => { prev.push(img.style.opacity); img.style.opacity = "0"; });
-      try {
-        snapshotDataUrl = await htmlToImage.toPng(mapShotRef.current, {
-          cacheBust: true,
-          useCORS: true,
-          imageTimeout: 5000,
-          pixelRatio: 2,
-          backgroundColor: "#f8fafc",
-        });
-      } catch (e2) {
-        console.warn("fallback snapshot failed:", e2);
-      } finally {
-        tileImgs.forEach((img, i) => (img.style.opacity = prev[i] ?? ""));
-      }
-    }
-
+    } catch {}
     try { if (restoreView) restoreView(); } catch {}
 
-    setSummary({
-      distance: dist,
-      durationMs: durMs,
-      pace_min_per_km,
-      avg_speed_kmh,
-      pace_label,
-      avg_speed_label,
-      weather,
-      elevation,
-      points: pts,
-      snapshotDataUrl,
-    });
-
-    // persist to backend (finish)
+    // Save to backend then redirect to Report page
     try {
       if (trackId) {
         const resp = await fetch("/api/tracks/finish", {
@@ -457,55 +407,22 @@ export default function App() {
         });
         const js = await resp.json().catch(() => ({}));
         if (resp.ok) {
-          setSummary((s) => ({
-            ...s,
-            snapshotUrl: js?.snapshot_url || s?.snapshotUrl || null,
-            report_no:   js?.report_no     || s?.report_no   || null,
-          }));
-          if (js?.report_no) setLatestReportNo(js.report_no);
-        } else {
-          console.warn("finish failed:", js);
+          const reportNo = js?.report_no || "(pending)";
+          // Redirect to /report/:id
+          nav(`/report/${trackId}`, { replace: true, state: { report_no: reportNo } });
+          return;
         }
       }
-    } catch (e) {
-      console.warn("finish error:", e);
-    }
-  };
+    } catch {}
 
-  // Backfill report_no if API didn’t return immediately
-  useEffect(() => {
-    (async () => {
-      if (trackId && !latestReportNo) {
-        const { data, error } = await supabase
-          .from("tracks")
-          .select("report_no")
-          .eq("id", trackId)
-          .maybeSingle();
-        if (!error && data?.report_no) setLatestReportNo(data.report_no);
-      }
-    })();
-  }, [trackId, latestReportNo]);
+    // If finish failed, still route to report (they can retry from there)
+    if (trackId) nav(`/report/${trackId}`, { replace: true });
+  };
 
   const center = useMemo(
     () => (last && Number.isFinite(last.lat) && Number.isFinite(last.lon) ? [last.lat, last.lon] : [30, -97]),
     [last]
   );
-
-  const finalReportNo =
-    (summary && summary.report_no) ||
-    (submittedReport && submittedReport.report_no) ||
-    latestReportNo ||
-    "(pending)";
-
-  const pdfProps = buildPdfProps(summary, {
-    report_no: finalReportNo,
-    handler: "Shelby",
-    dog: "Rogue",
-    email: "TestPD@TestCity.Gov",
-    device_id: deviceId,
-    track_id: trackId || "",
-    notes: submittedReport?.notes || "",
-  });
 
   return (
     <div
@@ -520,7 +437,13 @@ export default function App() {
     >
       {/* Left panel */}
       <div style={{ padding: 12, overflowY: "auto", borderRight: "1px solid #e5e7eb", background: "#fff" }}>
-        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>K9 Live Tracker</div>
+        {/* Header with persistent Reports link */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>K9 Live Tracker</div>
+          <Link to="/report/new">
+            <button style={{ padding: "6px 10px", borderRadius: 10 }}>Reports</button>
+          </Link>
+        </div>
 
         <div style={{ display: "flex", gap: 6, background: "#f1f5f9", borderRadius: 14, padding: 6, marginBottom: 8 }}>
           <button
@@ -576,9 +499,7 @@ export default function App() {
             <input type="checkbox" checked={conn.ssl} onChange={(e) => setConn({ ...conn, ssl: e.target.checked })} /> TLS (8883)
           </label>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 13 }}>
-            <button onClick={connect} style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>Connect</button>
-            <button onClick={disconnect} style={{ padding: "6px 10px", borderRadius: 10 }}>Disconnect</button>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: 8 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <span
                 style={{
                   width: 10,
@@ -598,7 +519,7 @@ export default function App() {
             </span>
             <span style={{ marginLeft: "auto", fontSize: 12, color: "#6b7280" }}>Msgs: {msgs}</span>
           </div>
-          {status === "error" && errorMsg && (
+          {status === "error" && (
             <div style={{ marginTop: 8, fontSize: 12, color: "#b91c1c", whiteSpace: "pre-wrap" }}>{errorMsg}</div>
           )}
         </div>
@@ -628,150 +549,12 @@ export default function App() {
                   Stop
                 </button>
               )}
-              <button
-                onClick={() => {
-                  setPoints([]); setDistance(0); setElapsed(0); setStartAt(null);
-                  setSummary(null); setReportSubmitted(false); setSubmittedReport(null);
-                  setLatestReportNo(""); setTrackId(null);
-                }}
-                style={{ padding: "6px 10px", borderRadius: 10 }}
-              >
-                Clear
-              </button>
+              {/* (We also have the persistent Reports button up top now) */}
             </div>
 
             <div>Time: {prettyDuration(elapsed)}</div>
             <div>Distance: {prettyDistance(distance)}</div>
             <div style={{ fontSize: 12, color: "#64748b" }}>Crumbs: {points.length}</div>
-
-            {/* Summary after Stop */}
-            {summary && !tracking && (
-              <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
-                <div>Track #: {finalReportNo}</div>
-                <div>Track ID: {trackId || "—"}</div>
-                <div>Distance: {prettyDistance(summary.distance)}</div>
-                <div>Duration: {prettyDuration(summary.durationMs)}</div>
-                <div>Pace: {summary.pace_label ?? "—"}</div>
-                <div>Avg speed: {summary.avg_speed_label ?? "—"}</div>
-                <div>
-                  Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
-                </div>
-                <div>
-                  Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
-                </div>
-
-                {/* Snapshot preview (prefer data URL, fallback to server URL) */}
-                {(() => {
-                  const snapData = summary?.snapshotDataUrl || "";
-                  const snapUrl  = summary?.snapshotUrl || "";
-                  const src = snapData || snapUrl;
-                  if (!src) return null;
-                  return (
-                    <div style={{ marginTop: 8 }}>
-                      <img
-                        src={src}
-                        alt="snapshot"
-                        style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
-                        onError={(e) => {
-                          if (snapData && snapUrl && e.currentTarget.src === snapData) {
-                            e.currentTarget.src = snapUrl;
-                          } else {
-                            const note = document.createElement("div");
-                            note.style.cssText = "color:#b91c1c;font-size:12px;margin-top:4px";
-                            note.textContent = "Snapshot preview failed to load.";
-                            e.currentTarget.replaceWith(note);
-                          }
-                        }}
-                      />
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Report form after stop (operators only) */}
-        {!isViewer && tab === "k9" && summary && !tracking && (
-          <div style={{ marginTop: 8 }}>
-            <ReportForm
-              defaultTrackId={trackId}
-              report_no={finalReportNo}
-              snapshotUrl={summary?.snapshotDataUrl || summary?.snapshotUrl || ""}
-              device_id={deviceId}
-              onSubmitted={(info) => {
-                setReportSubmitted(true);
-                setSubmittedReport(info);
-                if (info?.report_no) setLatestReportNo(info.report_no);
-              }}
-            />
-          </div>
-        )}
-
-        {/* PDF buttons ONLY after report submitted */}
-        {!isViewer && reportSubmitted && summary && (
-          <div style={{ marginTop: 8, padding: 12, background: "rgba(255,255,255,0.98)", border: "1px solid #e5e7eb", borderRadius: 12 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Report PDF</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <PDFDownloadLink
-                document={
-                  <ReportPDF
-                    {...buildPdfProps(summary, {
-                      report_no: finalReportNo,
-                      handler: "Shelby",
-                      dog: "Rogue",
-                      email: "TestPD@TestCity.Gov",
-                      device_id: deviceId,
-                      track_id: trackId || "",
-                      notes: submittedReport?.notes || "",
-                    })}
-                  />
-                }
-                fileName={`k9_report_${finalReportNo || "latest"}.pdf`}
-              >
-                {({ loading }) => (
-                  <button style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>
-                    {loading ? "Building…" : "Download PDF"}
-                  </button>
-                )}
-              </PDFDownloadLink>
-
-              <button
-                onClick={async () => {
-                  const w = window.open("", "_blank");
-                  try {
-                    const blob = await pdf(
-                      <ReportPDF
-                        {...buildPdfProps(summary, {
-                          report_no: finalReportNo,
-                          handler: "Shelby",
-                          dog: "Rogue",
-                          email: "TestPD@TestCity.Gov",
-                          device_id: deviceId,
-                          track_id: trackId || "",
-                          notes: submittedReport?.notes || "",
-                        })}
-                      />
-                    ).toBlob();
-                    const url = URL.createObjectURL(blob);
-                    if (w) {
-                      w.location.href = url;
-                      setTimeout(() => URL.revokeObjectURL(url), 60000);
-                    } else {
-                      window.open(url, "_blank");
-                      setTimeout(() => URL.revokeObjectURL(url), 60000);
-                    }
-                  } catch (e) {
-                    console.error("PDF view error:", e);
-                    if (w) w.close();
-                  }
-                }}
-                style={{ padding: "6px 10px", borderRadius: 10 }}
-              >
-                View PDF
-              </button>
-            </div>
           </div>
         )}
       </div>
@@ -791,12 +574,11 @@ export default function App() {
           style={{ height: "100%", width: "100%" }}
         >
           <TileLayer
-            // CORS-friendly tiles for snapshot reliability
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             attribution="&copy; OpenStreetMap contributors"
             crossOrigin="anonymous"
           />
-          {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
+          {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
             <Recenter lat={last.lat} lon={last.lon} />
           )}
           {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
@@ -810,6 +592,254 @@ export default function App() {
     </div>
   );
 }
+
+/* =========================
+   Report Page (form + history)
+========================= */
+function ReportPage() {
+  const { id } = useParams(); // track id (may be undefined for /report/new)
+  const [track, setTrack] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [recent, setRecent] = useState([]);
+  const [submittedInfo, setSubmittedInfo] = useState(null);
+
+  const deviceId = "esp-shelby-01";
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      // fetch current track (if id provided)
+      if (id) {
+        const { data, error } = await supabase
+          .from("tracks")
+          .select("*")
+          .eq("id", id)
+          .maybeSingle();
+        if (!error) setTrack(data || null);
+      } else {
+        setTrack(null);
+      }
+
+      // fetch recent tracks for history (last 15)
+      const { data: hist } = await supabase
+        .from("tracks")
+        .select("id, report_no, created_at, snapshot_url, distance_m, duration_ms")
+        .eq("device_id", deviceId)
+        .order("created_at", { ascending: false })
+        .limit(15);
+      setRecent(hist || []);
+
+      setLoading(false);
+    })();
+  }, [id]);
+
+  const summaryForPdf = track
+    ? {
+        distance: Number(track.distance_m || 0),
+        durationMs: Number(track.duration_ms || 0),
+        pace_min_per_km: Number(track.pace_min_per_km || 0),
+        avg_speed_kmh: Number(track.avg_speed_kmh || 0),
+        pace_label: track.pace_min_per_km
+          ? `${Math.floor(track.pace_min_per_km)}:${String(Math.round((track.pace_min_per_km % 1) * 60)).padStart(2,"0")} /km`
+          : "—",
+        avg_speed_label: track.avg_speed_kmh ? `${Number(track.avg_speed_kmh).toFixed(2)} km/h` : "—",
+        weather: track.weather || null,
+        snapshotUrl: track.snapshot_url || "",
+      }
+    : null;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "520px 1fr", gap: 16, padding: 16 }}>
+      <div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+          <h2 style={{ margin: 0 }}>Track Report</h2>
+          <Link to="/" style={{ fontSize: 14 }}>← Back to Live</Link>
+        </div>
+
+        {loading && <div style={{ marginTop: 8 }}>Loading…</div>}
+
+        {!loading && !track && (
+          <div style={{ marginTop: 8, color: "#475569" }}>
+            Select a recent track on the right to fill its report.
+          </div>
+        )}
+
+        {track && (
+          <>
+            <div style={{ marginTop: 8, fontSize: 13, color: "#475569" }}>
+              <div><b>Report #:</b> {track.report_no || "(pending)"}</div>
+              <div><b>Track ID:</b> {track.id}</div>
+              <div><b>Started:</b> {track.started_at ? new Date(track.started_at).toLocaleString() : "—"}</div>
+              <div><b>Distance:</b> {prettyDistance(Number(track.distance_m || 0))}</div>
+              <div><b>Duration:</b> {prettyDuration(Number(track.duration_ms || 0))}</div>
+            </div>
+
+            {/* Snapshot preview */}
+            {track.snapshot_url && (
+              <div style={{ marginTop: 8 }}>
+                <img
+                  src={track.snapshot_url}
+                  alt="snapshot"
+                  style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
+                />
+              </div>
+            )}
+
+            {/* Report form */}
+            <div style={{ marginTop: 12 }}>
+              <ReportForm
+                defaultTrackId={track.id}
+                report_no={track.report_no || "(pending)"}
+                snapshotUrl={track.snapshot_url || ""}
+                device_id={deviceId}
+                onSubmitted={(info) => setSubmittedInfo(info)}
+              />
+            </div>
+
+            {/* PDF actions only after form submit */}
+            {submittedInfo && summaryForPdf && (
+              <div style={{ marginTop: 12, padding: 12, border: "1px solid #e5e7eb", borderRadius: 10 }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Report PDF</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <PDFDownloadLink
+                    document={
+                      <ReportPDF
+                        {...buildPdfProps(summaryForPdf, {
+                          report_no: track.report_no || "(pending)",
+                          handler: "Shelby",
+                          dog: "Rogue",
+                          email: "TestPD@TestCity.Gov",
+                          device_id: deviceId,
+                          track_id: track.id,
+                          notes: submittedInfo?.notes || "",
+                        })}
+                      />
+                    }
+                    fileName={`k9_report_${track.report_no || "latest"}.pdf`}
+                  >
+                    {({ loading }) => (
+                      <button style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>
+                        {loading ? "Building…" : "Download PDF"}
+                      </button>
+                    )}
+                  </PDFDownloadLink>
+
+                  <button
+                    onClick={async () => {
+                      const w = window.open("", "_blank");
+                      try {
+                        const blob = await pdf(
+                          <ReportPDF
+                            {...buildPdfProps(summaryForPdf, {
+                              report_no: track.report_no || "(pending)",
+                              handler: "Shelby",
+                              dog: "Rogue",
+                              email: "TestPD@TestCity.Gov",
+                              device_id: deviceId,
+                              track_id: track.id,
+                              notes: submittedInfo?.notes || "",
+                            })}
+                          />
+                        ).toBlob();
+                        const url = URL.createObjectURL(blob);
+                        if (w) {
+                          w.location.href = url;
+                          setTimeout(() => URL.revokeObjectURL(url), 60000);
+                        } else {
+                          window.open(url, "_blank");
+                          setTimeout(() => URL.revokeObjectURL(url), 60000);
+                        }
+                      } catch (e) {
+                        console.error("PDF view error:", e);
+                        if (w) w.close();
+                      }
+                    }}
+                    style={{ padding: "6px 10px", borderRadius: 10 }}
+                  >
+                    View PDF
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Right column: recent history */}
+      <div>
+        <h3 style={{ marginTop: 0 }}>Recent Tracks</h3>
+        {recent.length === 0 && <div>No recent tracks.</div>}
+        <div style={{ display: "grid", gap: 10 }}>
+          {recent.map((t) => {
+            const dist = Number(t.distance_m || 0);
+            const dur = Number(t.duration_ms || 0);
+            const summ = {
+              distance: dist,
+              durationMs: dur,
+              pace_min_per_km: dist > 0 ? (dur / 60000) / (dist / 1000) : 0,
+              avg_speed_kmh: dist > 0 ? (dist / 1000) / (dur / 3600000 || 1) : 0,
+              pace_label: dist > 0
+                ? `${Math.floor((dur / 60000) / (dist / 1000))}:${String(Math.round((((dur / 60000) / (dist / 1000)) % 1) * 60)).padStart(2,"0")} /km`
+                : "—",
+              avg_speed_label: dist > 0 ? `${(((dist / 1000) / (dur / 3600000 || 1)) || 0).toFixed(2)} km/h` : "—",
+              weather: null,
+              snapshotUrl: t.snapshot_url || "",
+            };
+            return (
+              <div key={t.id} style={{ border: "1px solid #e5e7eb", borderRadius: 10, padding: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{t.report_no || "(pending)"}</div>
+                    <div style={{ fontSize: 12, color: "#64748b" }}>{new Date(t.created_at).toLocaleString()}</div>
+                    <div style={{ fontSize: 12 }}>Distance: {prettyDistance(dist)} · Duration: {prettyDuration(dur)}</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <Link to={`/report/${t.id}`}><button>Open</button></Link>
+                    {t.snapshot_url && <a href={t.snapshot_url} target="_blank" rel="noreferrer"><button>Snapshot</button></a>}
+                    <PDFDownloadLink
+                      document={
+                        <ReportPDF
+                          {...buildPdfProps(summ, {
+                            report_no: t.report_no || "(pending)",
+                            handler: "Shelby",
+                            dog: "Rogue",
+                            email: "TestPD@TestCity.Gov",
+                            device_id: "esp-shelby-01",
+                            track_id: t.id,
+                          })}
+                        />
+                      }
+                      fileName={`k9_report_${t.report_no || "latest"}.pdf`}
+                    >
+                      {({ loading }) => <button>{loading ? "Building…" : "PDF"}</button>}
+                    </PDFDownloadLink>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================
+   App Router
+========================= */
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<LivePage />} />
+        <Route path="/report/:id" element={<ReportPage />} />
+        {/* Route to open Reports list directly */}
+        <Route path="/report/new" element={<ReportPage />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
 
 
 
