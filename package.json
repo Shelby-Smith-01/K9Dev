@@ -1,6 +1,6 @@
 {
   "name": "k9-tracker",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": true,
   "engines": { "node": "20.x" },
   "scripts": {
@@ -9,14 +9,15 @@
     "preview": "vite preview --port 5173"
   },
   "dependencies": {
+    "@react-pdf/renderer": "^3.4.2",
     "@supabase/supabase-js": "^2.45.0",
-    "@react-pdf/renderer": "^3.4.0",
     "html-to-image": "^1.11.11",
     "leaflet": "1.9.4",
     "mqtt": "4.3.7",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "react-leaflet": "4.2.1"
+    "react-leaflet": "4.2.1",
+    "react-router-dom": "^6.26.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.0",
