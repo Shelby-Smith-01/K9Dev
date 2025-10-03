@@ -79,7 +79,6 @@ function useSSE(conn, onMessage) {
   const [errorMsg, setErrorMsg] = useState("");
   const esRef = useRef(null);
 
-  // keep latest handler without re-opening SSE
   const onMsgRef = useRef(onMessage);
   useEffect(() => { onMsgRef.current = onMessage; }, [onMessage]);
 
@@ -175,7 +174,7 @@ function buildPdfProps(summary, extras = {}) {
   } = summary || {};
 
   const snapshotUrl =
-    (summary && (summary.snapshotUrl || summary.snapshotDataUrl)) || "";
+    (summary && (summary.snapshotDataUrl || summary.snapshotUrl)) || "";
 
   return {
     departmentName: "Test PD",
@@ -236,7 +235,7 @@ export default function App() {
           if (!Number.isFinite(newPt.lat) || !Number.isFinite(newPt.lon)) return prev;
           const lastPt = prev.length ? prev[prev.length - 1] : null;
           const seg = lastPt ? haversine(lastPt, newPt) : 0;
-          if (lastPt && seg < 0.5) return prev; // ignore <0.5m jitter
+          if (lastPt && seg < 0.5) return prev; // ignore tiny jitter <0.5m
           if (lastPt) setDistance((d) => d + seg);
           return [...prev, newPt];
         });
@@ -410,7 +409,7 @@ export default function App() {
       weather,
       elevation,
       points: pts,
-      snapshotDataUrl,
+      snapshotDataUrl, // keep in-memory snapshot immediately
     });
 
     // persist to backend
@@ -433,11 +432,13 @@ export default function App() {
         });
         const js = await resp.json().catch(() => ({}));
         if (resp.ok) {
-          if (js?.snapshot_url) setSummary((s) => ({ ...s, snapshotUrl: js.snapshot_url }));
-          if (js?.report_no) {
-            setSummary((s) => ({ ...s, report_no: js.report_no }));
-            setLatestReportNo(js.report_no);
-          }
+          // Merge carefully: keep data URL, add server URL if present
+          setSummary((s) => ({
+            ...s,
+            snapshotUrl: js?.snapshot_url || s?.snapshotUrl || null,
+            report_no:   js?.report_no     || s?.report_no   || null,
+          }));
+          if (js?.report_no) setLatestReportNo(js.report_no);
         } else {
           console.warn("finish failed:", js);
         }
@@ -500,22 +501,38 @@ export default function App() {
         <div style={{ display: "flex", gap: 6, background: "#f1f5f9", borderRadius: 14, padding: 6, marginBottom: 8 }}>
           <button
             onClick={() => setTab("live")}
-            style={{ padding: "6px 10px", borderRadius: 10, background: tab === "live" ? "#fff" : "transparent",
-              boxShadow: tab === "live" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 10,
+              background: tab === "live" ? "#fff" : "transparent",
+              boxShadow: tab === "live" ? "0 2px 8px rgba(0,0,0,.06)" : "none",
+            }}
           >
             Live Map
           </button>
           <button
             onClick={() => setTab("k9")}
-            style={{ padding: "6px 10px", borderRadius: 10, background: tab === "k9" ? "#fff" : "transparent",
-              boxShadow: tab === "k9" ? "0 2px 8px rgba(0,0,0,.06)" : "none" }}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 10,
+              background: tab === "k9" ? "#fff" : "transparent",
+              boxShadow: tab === "k9" ? "0 2px 8px rgba(0,0,0,.06)" : "none",
+            }}
           >
             K9 Track
           </button>
         </div>
 
         {/* Connection panel (SSE) */}
-        <div style={{ padding: 12, background: "rgba(255,255,255,0.98)", border: "1px solid #e5e7eb", borderRadius: 12, maxWidth: 420 }}>
+        <div
+          style={{
+            padding: 12,
+            background: "rgba(255,255,255,0.98)",
+            border: "1px solid #e5e7eb",
+            borderRadius: 12,
+            maxWidth: 420,
+          }}
+        >
           <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>MQTT (SSE bridge)</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <label style={{ fontSize: 12 }}>
@@ -538,10 +555,21 @@ export default function App() {
             <button onClick={connect} style={{ padding: "6px 10px", borderRadius: 10, background: "#111", color: "#fff" }}>Connect</button>
             <button onClick={disconnect} style={{ padding: "6px 10px", borderRadius: 10 }}>Disconnect</button>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: 8 }}>
-              <span style={{
-                width: 10, height: 10, borderRadius: "50%",
-                background: status === "connected" ? "#22c55e" : status === "error" ? "#ef4444" : status === "reconnecting" ? "#f59e0b" : "#d1d5db",
-              }}/>
+              <span
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: "50%",
+                  background:
+                    status === "connected"
+                      ? "#22c55e"
+                      : status === "error"
+                      ? "#ef4444"
+                      : status === "reconnecting"
+                      ? "#f59e0b"
+                      : "#d1d5db",
+                }}
+              />
               <span style={{ fontSize: 12, color: "#6b7280" }}>{status || "idle"}</span>
             </span>
             <span style={{ marginLeft: "auto", fontSize: 12, color: "#6b7280" }}>Msgs: {msgs}</span>
@@ -592,50 +620,53 @@ export default function App() {
             <div>Distance: {prettyDistance(distance)}</div>
             <div style={{ fontSize: 12, color: "#64748b" }}>Crumbs: {points.length}</div>
 
-           {summary && !tracking && (
-  <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
-    <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
-    <div>Track #: {finalReportNo}</div>
-    <div>Track ID: {trackId || "—"}</div>
-    <div>Distance: {prettyDistance(summary.distance)}</div>
-    <div>Duration: {prettyDuration(summary.durationMs)}</div>
-    <div>Pace: {summary.pace_label ?? "—"}</div>
-    <div>Avg speed: {summary.avg_speed_label ?? "—"}</div>
-    <div>
-      Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
-    </div>
-    <div>
-      Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
-    </div>
-    {(() => {
-      // Prefer immediate in-memory snapshot first; then fallback to server URL.
-      const snapData = summary?.snapshotDataUrl || "";
-      const snapUrl  = summary?.snapshotUrl || "";
-      const src = snapData || snapUrl;
-      if (!src) return null;
-      return (
-        <div style={{ marginTop: 8 }}>
-          <img
-            src={src}
-            alt="snapshot"
-            style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
-            onError={(e) => {
-              // If data URL fails (rare), try server URL; if that fails, show a friendly message.
-              if (snapData && snapUrl && e.currentTarget.src === snapData) {
-                e.currentTarget.src = snapUrl;
-              } else {
-                const el = document.createElement("div");
-                el.style.cssText = "color:#b91c1c;font-size:12px;margin-top:4px";
-                el.textContent = "Snapshot preview failed to load.";
-                e.currentTarget.replaceWith(el);
-              }
-            }}
-          />
-        </div>
-      );
-    })()}
-  </div>
-)}
+            {/* Summary after Stop */}
+            {summary && !tracking && (
+              <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
+                <div>Track #: {finalReportNo}</div>
+                <div>Track ID: {trackId || "—"}</div>
+                <div>Distance: {prettyDistance(summary.distance)}</div>
+                <div>Duration: {prettyDuration(summary.durationMs)}</div>
+                <div>Pace: {summary.pace_label ?? "—"}</div>
+                <div>Avg speed: {summary.avg_speed_label ?? "—"}</div>
+                <div>
+                  Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
+                </div>
+                <div>
+                  Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
+                </div>
+
+                {/* Snapshot preview: prefer data URL, fallback to server URL, then friendly text */}
+                {(() => {
+                  const snapData = summary?.snapshotDataUrl || "";
+                  const snapUrl  = summary?.snapshotUrl || "";
+                  const src = snapData || snapUrl;
+                  if (!src) return null;
+                  return (
+                    <div style={{ marginTop: 8 }}>
+                      <img
+                        src={src}
+                        alt="snapshot"
+                        style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
+                        onError={(e) => {
+                          if (snapData && snapUrl && e.currentTarget.src === snapData) {
+                            e.currentTarget.src = snapUrl; // try server URL
+                          } else {
+                            const note = document.createElement("div");
+                            note.style.cssText = "color:#b91c1c;font-size:12px;margin-top:4px";
+                            note.textContent = "Snapshot preview failed to load.";
+                            e.currentTarget.replaceWith(note);
+                          }
+                        }}
+                      />
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Report form after stop (operators only) */}
         {!isViewer && tab === "k9" && summary && !tracking && (
@@ -643,7 +674,7 @@ export default function App() {
             <ReportForm
               defaultTrackId={trackId}
               report_no={finalReportNo}
-              snapshotUrl={summary?.snapshotUrl || summary?.snapshotDataUrl || ""}
+              snapshotUrl={summary?.snapshotDataUrl || summary?.snapshotUrl || ""}
               device_id={deviceId}
               onSubmitted={(info) => {
                 setReportSubmitted(true);
