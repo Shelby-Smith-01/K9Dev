@@ -367,75 +367,102 @@ export default function App() {
   }
 
   async function stopTrack() {
-    if (!user) { alert("Sign in to stop a track."); return; }
+  if (!user) { alert("Sign in to stop a track."); return; }
+  try {
+    setTracking(false);
+    const durMs = startAt ? Date.now() - startAt : 0;
+    const dist = distance;
+
+    // Weather near midpoint
+    const center = points.length ? points[Math.floor(points.length/2)] : last;
+    let weather=null, elevationStats=null;
     try {
-      setTracking(false);
-      const durMs = startAt ? Date.now() - startAt : 0;
-      const dist = distance;
-
-      const center = points.length ? points[Math.floor(points.length/2)] : last;
-      let weather=null, elevationStats=null;
-      try {
-        if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
-          const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then(r=>r.json());
-          weather = w?.current_weather || null;
-        }
-      } catch {}
-      try {
-        if (points.length) {
-          const sample = points.filter((_,i)=> i % Math.max(1, Math.floor(points.length / 100)) === 0);
-          const locs = sample.map(p=>`${p.lat},${p.lon}`).join("|");
-          const e = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`).then(r=>r.json());
-          const els = e?.results?.map(r=>r.elevation).filter(Number.isFinite) || [];
-          if (els.length) {
-            let gain=0, loss=0;
-            for (let i=1;i<els.length;i++) {
-              const d = els[i]-els[i-1];
-              if (d>0) gain += d; else loss += Math.abs(d);
-            }
-            elevationStats = { gain, loss };
+      if (center && Number.isFinite(center.lat) && Number.isFinite(center.lon)) {
+        const w = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${center.lat}&longitude=${center.lon}&current_weather=true`).then(r=>r.json());
+        weather = w?.current_weather || null;
+      }
+    } catch {}
+    try {
+      if (points.length) {
+        const sample = points.filter((_,i)=> i % Math.max(1, Math.floor(points.length / 100)) === 0);
+        const locs = sample.map(p=>`${p.lat},${p.lon}`).join("|");
+        const e = await fetch(`https://api.open-elevation.com/api/v1/lookup?locations=${encodeURIComponent(locs)}`).then(r=>r.json());
+        const els = e?.results?.map(r=>r.elevation).filter(Number.isFinite) || [];
+        if (els.length) {
+          let gain=0, loss=0;
+          for (let i=1;i<els.length;i++) {
+            const d = els[i]-els[i-1];
+            if (d>0) gain += d; else loss += Math.abs(d);
           }
+          elevationStats = { gain, loss };
         }
-      } catch {}
+      }
+    } catch {}
 
-      const pace = paceFrom(dist, durMs);
-      const avg = avgSpeedFrom(dist, durMs);
-      const snapshotDataUrl = await captureSnapshot();
+    // --- Compute numeric + pretty labels ---
+    // numeric pace: minutes per km (e.g. 6.250 means 6m15s / km)
+    const paceNum = (dist > 0 && durMs > 0)
+      ? Number(((durMs / 60000) / (dist / 1000)).toFixed(3))
+      : null;
+    // pretty label for UI: "mm:ss min/km"
+    let paceLabel = "—";
+    if (paceNum != null) {
+      const mm = Math.floor(paceNum);
+      const ss = Math.round((paceNum - mm) * 60);
+      paceLabel = `${mm}:${ss.toString().padStart(2,"0")} min/km`;
+    }
 
-      const body = {
-        id: trackId,
-        device_id: DEVICE_ID,
-        distance_m: dist,
-        duration_ms: durMs,
-        pace_min_per_km: pace,
-        avg_speed_kmh: avg,
-        weather,
-        elevation: elevationStats,
-        points,
-        snapshotDataUrl
-      };
-      const resp = await authFetch("/api/tracks/finish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).then(r=>r.json());
-      if (!resp.ok) throw new Error(resp.error || "finish failed");
+    // numeric avg speed: km/h
+    const avgNum = (dist > 0 && durMs > 0)
+      ? Number(((dist / 1000) / (durMs / 3600000)).toFixed(2))
+      : null;
+    const avgLabel = (avgNum != null) ? `${avgNum.toFixed(2)} km/h` : "—";
 
-      setSummary({
-        distance: dist,
-        durationMs: durMs,
-        weather,
-        elevation: elevationStats,
-        points,
-        snapshotUrl: resp.snapshot_url || null,
-        report_no: resp.report_no || null,
-        paceMinPerKm: pace,
-        avgSpeedKmh: avg,
-      });
+    // Snapshot (optional)
+    const snapshotDataUrl = await captureSnapshot();
 
-      setStartAt(null);
-    } catch (e) { alert(e.message || String(e)); }
+    // --- Send NUMERIC values to DB ---
+    const body = {
+      id: trackId,
+      device_id: DEVICE_ID,
+      distance_m: dist,            // numeric
+      duration_ms: durMs,          // numeric
+      pace_min_per_km: paceNum,    // numeric (NOT "mm:ss min/km")
+      avg_speed_kmh: avgNum,       // numeric (NOT "X km/h")
+      weather,
+      elevation: elevationStats,
+      points,
+      snapshotDataUrl
+    };
+
+    const resp = await authFetch("/api/tracks/finish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(r=>r.json());
+    if (!resp.ok) throw new Error(resp.error || "finish failed");
+
+    // Keep pretty strings for UI
+    setSummary({
+      distance: dist,
+      durationMs: durMs,
+      weather,
+      elevation: elevationStats,
+      points,
+      snapshotUrl: resp.snapshot_url || null,
+      report_no: resp.report_no || null,
+      paceMinPerKm: paceLabel,   // UI string
+      avgSpeedKmh:  avgLabel,    // UI string
+      // keep numeric too if you want to chart later:
+      paceNum,
+      avgNum,
+    });
+
+    setStartAt(null);
+  } catch (e) {
+    alert(e.message || String(e));
   }
+}
 
   function clearTrack() {
     setTracking(false);
