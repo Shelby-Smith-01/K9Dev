@@ -474,12 +474,27 @@ export default function App() {
         points,
         snapshotDataUrl
       };
-      const resp = await authFetch("/api/tracks/finish", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).then(r=>r.json());
-      if (!resp.ok) throw new Error(resp.error || "finish failed");
+      // After finishing the track:
+const resp = await fetch("/api/tracks/finish", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    track_id: trackId,
+    distance_m: distance,
+    duration_ms: durMs,
+    pace_min_per_km: paceMinPerKm,
+    avg_speed_kmh: avgSpeedKmh,
+    weather,
+    elevation,
+    points,
+    snapshotDataUrl: summary?.snapshotDataUrl, // the captured data: URL you took
+  }),
+});
+const js = await resp.json();
+setSummary((s) => ({
+  ...s,
+  snapshotUrl: js.snapshot_url || s?.snapshotUrl || s?.snapshotDataUrl || null,
+}));
 
       setSummary({
         distance: dist,
