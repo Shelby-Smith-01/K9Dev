@@ -153,9 +153,11 @@ function buildPdfProps(summary, extras = {}) {
     pace_label = "—",
     avg_speed_label = "—",
     weather = null,
-    snapshotUrl = "",
   } = summary || {};
-  const distance_m = distance || 0;
+
+  // ✅ Prefer public Storage URL, fallback to data URL from html-to-image
+  const snapshotUrl =
+    (summary && (summary.snapshotUrl || summary.snapshotDataUrl)) || "";
 
   return {
     departmentName: "Test PD",
@@ -167,12 +169,12 @@ function buildPdfProps(summary, extras = {}) {
     email: extras.email || "TestPD@TestCity.Gov",
     deviceId: extras.device_id || "esp-shelby-01",
     trackId: extras.track_id || "",
-    distance_m,
-    duration_ms: durationMs,
+    distance_m: distance || 0,
+    duration_ms: durationMs || 0,
     pace_label,
     avg_speed_label,
     weather,
-    snapshotUrl: snapshotUrl || "",
+    snapshotUrl, // <-- important
     notes: extras.notes || "",
   };
 }
@@ -436,40 +438,52 @@ export default function App() {
           </div>
         )}
 
-        {/* PDF buttons ONLY after report submitted */}
-        {!isViewer && reportSubmitted && summary && (
-          <div style={{ marginTop:8, padding:12, background:'rgba(255,255,255,0.98)', border:'1px solid #e5e7eb', borderRadius:12 }}>
-            <div style={{ fontWeight:600, marginBottom:6 }}>Report PDF</div>
-            <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-              <PDFDownloadLink
-                document={<ReportPDF {...pdfProps} />}
-                fileName={`k9_report_${pdfProps.reportNo || "latest"}.pdf`}
-              >
-                {({ loading }) => (
-                  <button style={{ padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff' }}>
-                    {loading ? "Building…" : "Download PDF"}
-                  </button>
-                )}
-              </PDFDownloadLink>
-
-              <button
-                onClick={async () => {
-                  const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = `k9_report_${pdfProps.reportNo || "latest"}.pdf`;
-                  a.click();
-                  URL.revokeObjectURL(url);
-                }}
-                style={{ padding:'6px 10px', borderRadius:10 }}
-              >
-                Build & Download
-              </button>
-            </div>
-          </div>
+       {/* PDF buttons ONLY after report submitted */}
+{!isViewer && reportSubmitted && summary && (
+  <div style={{ marginTop:8, padding:12, background:'rgba(255,255,255,0.98)', border:'1px solid #e5e7eb', borderRadius:12 }}>
+    <div style={{ fontWeight:600, marginBottom:6 }}>Report PDF</div>
+    <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+      {/* Keep: Download PDF */}
+      <PDFDownloadLink
+        document={<ReportPDF {...pdfProps} />}
+        fileName={`k9_report_${pdfProps.reportNo || "latest"}.pdf`}
+      >
+        {({ loading }) => (
+          <button style={{ padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff' }}>
+            {loading ? "Building…" : "Download PDF"}
+          </button>
         )}
-      </div>
+      </PDFDownloadLink>
+
+      {/* New: View PDF in a new tab */}
+      <button
+        onClick={async () => {
+          // pre-open to avoid popup blockers
+          const w = window.open("", "_blank");
+          try {
+            const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
+            const url = URL.createObjectURL(blob);
+            if (w) {
+              w.location.href = url;
+              // clean up after a little delay so the tab can load
+              setTimeout(() => URL.revokeObjectURL(url), 60000);
+            } else {
+              // fallback if popup blocked
+              window.open(url, "_blank");
+              setTimeout(() => URL.revokeObjectURL(url), 60000);
+            }
+          } catch (e) {
+            console.error("PDF view error:", e);
+            if (w) w.close();
+          }
+        }}
+        style={{ padding:'6px 10px', borderRadius:10 }}
+      >
+        View PDF
+      </button>
+    </div>
+  </div>
+)}
 
       {/* Right: Map (this wrapper is snapshot target) */}
       <div ref={mapShotRef} style={{ height: "100vh", width: "100%" }}>
