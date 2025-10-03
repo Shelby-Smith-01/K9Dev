@@ -1,20 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import * as htmlToImage from "html-to-image";
 import ReportForm from "./components/ReportForm";
 import { supabase } from "./lib/supabaseClient";
-import LoginCard from "./components/LoginCard";
 
-
-/* ======================
-   Utilities
-====================== */
+/* ============= Utilities ============= */
 const haversine = (a, b) => {
   if (!a || !b) return 0;
   if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon) || !Number.isFinite(b.lat) || !Number.isFinite(b.lon)) return 0;
-  const R = 6371000; // m
+  const R = 6371000;
   const toRad = (d) => (d * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
   const dLon = toRad(b.lon - a.lon);
@@ -23,7 +18,6 @@ const haversine = (a, b) => {
   const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 };
-
 const prettyDistance = (m) => (m < 1000 ? `${m.toFixed(1)} m` : `${(m / 1000).toFixed(2)} km`);
 const prettyDuration = (ms) => {
   const s = Math.floor(ms / 1000);
@@ -48,7 +42,6 @@ const avgSpeedFrom = (m, ms) => {
   const kmh = (m / 1000) / (hours || 1);
   return `${kmh.toFixed(2)} km/h`;
 };
-
 function useInterval(callback, delay) {
   const savedRef = useRef(callback);
   useEffect(() => { savedRef.current = callback; }, [callback]);
@@ -59,33 +52,34 @@ function useInterval(callback, delay) {
   }, [delay]);
 }
 
-/* ======================
-   Config / Defaults
-====================== */
-const DEVICE_ID = "esp-shelby-01"; // use your actual device id
+/* ============= Config ============= */
+const DEVICE_ID = "esp-shelby-01";
 const defaultConn = {
   host: "broker.emqx.io",
-  port: 1883,     // SSE bridges to TCP; ssl=1 uses 8883
+  port: 1883,
   ssl: 0,
-  topic: `devices/${DEVICE_ID}/#`, // wildcard to receive telemetry + control
+  topic: `devices/${DEVICE_ID}/#`,
 };
 
-/* ======================
-   SSE Bridge (to /api/stream)
-====================== */
+/* ============= SSE Bridge ============= */
+// FIX: keep latest onMessage/onDiag via refs so the handler sees current tracking/viewerMode
 function useSSE(conn, onMessage, onDiag) {
-  const [status, setStatus] = useState("idle"); // idle | connecting | connected | error
+  const [status, setStatus] = useState("idle");
   const [msgs, setMsgs] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const [lastPayload, setLastPayload] = useState("");
   const esRef = useRef(null);
 
+  const msgRef = useRef(onMessage);
+  const diagRef = useRef(onDiag);
+  useEffect(() => { msgRef.current = onMessage; }, [onMessage]);
+  useEffect(() => { diagRef.current = onDiag; }, [onDiag]);
+
   const connect = () => {
     try { esRef.current?.close(); } catch {}
     esRef.current = null;
     setStatus("connecting");
-    setMsgs(0);
-    setErrorMsg("");
+    setMsgs(0); setErrorMsg(""); setLastPayload("");
 
     const u = new URL("/api/stream", window.location.origin);
     u.searchParams.set("host", (conn.host || "").trim());
@@ -102,20 +96,19 @@ function useSSE(conn, onMessage, onDiag) {
     const handle = (ev) => {
       try {
         const data = JSON.parse(ev.data || "{}");
-        // diag events: {connecting, connected, subscribed, error, info}
         if (ev.type === "message") {
           if (data.payload != null) {
             setMsgs((n) => n + 1);
             setLastPayload(`${data.topic}: ${data.payload}`);
-            onMessage && onMessage(data.topic, data.payload);
+            if (msgRef.current) msgRef.current(data.topic, data.payload);
           } else {
-            onDiag && onDiag(data);
+            if (diagRef.current) diagRef.current(data);
           }
         } else {
-          onDiag && onDiag(data);
+          if (diagRef.current) diagRef.current(data);
         }
-      } catch (e) {
-        // ignore parse errors
+      } catch {
+        // ignore
       }
     };
 
@@ -134,9 +127,7 @@ function useSSE(conn, onMessage, onDiag) {
   return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
-/* ======================
-   Map helpers
-====================== */
+/* ============= Map helpers ============= */
 function Recenter({ lat, lon }) {
   const map = useMap();
   useEffect(() => {
@@ -145,10 +136,14 @@ function Recenter({ lat, lon }) {
   return null;
 }
 
-/* ======================
-   UI: Connection Panel
-====================== */
-function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs, errorMsg, lastPayload }) {
+/* ============= Connection Panel ============= */
+function ConnectionPanel({
+  conn, setConn,
+  onConnect, onDisconnect,
+  status, msgs, errorMsg, lastPayload,
+  autoConnect, setAutoConnect,
+  pointsCount
+}) {
   return (
     <div style={{padding:12, background:'rgba(255,255,255,0.98)', border:'1px solid #e5e7eb', borderRadius:16, boxShadow:'0 4px 16px rgba(0,0,0,.08)', width:360}}>
       <div style={{fontSize:12, fontWeight:700, marginBottom:8}}>MQTT (via SSE bridge)</div>
@@ -167,8 +162,14 @@ function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs,
         </label>
         <div />
       </div>
+
       <label style={{fontSize:12, display:'block', marginTop:8}}>Topic
         <input style={{width:'100%'}} value={conn.topic} onChange={(e)=>setConn({...conn, topic:e.target.value})}/>
+      </label>
+
+      <label style={{fontSize:12, display:'flex', alignItems:'center', gap:8, marginTop:8}}>
+        <input type="checkbox" checked={autoConnect} onChange={(e)=>setAutoConnect(e.target.checked)} />
+        Auto connect on load
       </label>
 
       <div style={{display:'flex', alignItems:'center', gap:8, marginTop:10, fontSize:13}}>
@@ -191,40 +192,35 @@ function ConnectionPanel({ conn, setConn, onConnect, onDisconnect, status, msgs,
           {lastPayload}
         </div>
       )}
+
+      {/* Debug: points counter */}
+      <div style={{marginTop:8, fontSize:12, color:'#475569'}}>Points: {pointsCount}</div>
     </div>
   );
 }
 
-/* ======================
-   App
-====================== */
+/* ============= App ============= */
 export default function App() {
   const urlq = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
   const viewerMode = urlq.get("viewer") === "1";
   const initialTab = viewerMode ? "live" : (urlq.get("view") === "k9" ? "k9" : "live");
 
-  const [tab, setTab] = useState(initialTab);       // 'live' | 'k9'
-  const [panelOpen, setPanelOpen] = useState(true);
+  const [tab, setTab] = useState(initialTab);
   const [conn, setConn] = useState(defaultConn);
 
-  // Live position + breadcrumbs
-  const [last, setLast] = useState(null);           // {lat, lon, fix, sats, raw}
-  const [points, setPoints] = useState([]);         // [{lat,lon,ts}, ...]
-  const [tracking, setTracking] = useState(false);  // operator local tracking
+  const [last, setLast] = useState(null);
+  const [points, setPoints] = useState([]);
+  const [tracking, setTracking] = useState(false);
   const [startAt, setStartAt] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [distance, setDistance] = useState(0);
   const [autoBreadcrumbFixOnly, setAutoBreadcrumbFixOnly] = useState(true);
   const [recenterOnUpdate, setRecenterOnUpdate] = useState(true);
-
-  // Viewer-only: follow "start/stop" control to show/hide breadcrumbs
   const [viewerTrackActive, setViewerTrackActive] = useState(false);
 
-  // Start/Finish summary
   const [trackId, setTrackId] = useState(null);
-  const [summary, setSummary] = useState(null); // { distance, durationMs, weather, elevation, points, report_no, snapshotUrl }
+  const [summary, setSummary] = useState(null);
 
-  // Auth state (operator)
   const [user, setUser] = useState(null);
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data?.user || null));
@@ -233,7 +229,6 @@ export default function App() {
     });
     return () => sub?.subscription?.unsubscribe();
   }, []);
-
   async function authFetch(url, options = {}) {
     const { data: session } = await supabase.auth.getSession();
     const token = session?.session?.access_token;
@@ -243,11 +238,10 @@ export default function App() {
     });
   }
 
-  // SSE
+  // SSE with FIXED latest-state handler
   const { status, msgs, errorMsg, lastPayload, connect, disconnect } = useSSE(
     conn,
     (topic, payloadTxt) => {
-      // parse telemetry & control
       let js = null;
       try { js = JSON.parse(payloadTxt); } catch {}
       if (!js) return;
@@ -263,7 +257,7 @@ export default function App() {
         if (Number.isFinite(lat) && Number.isFinite(lon)) {
           setLast({ lat, lon, fix, sats, raw: js });
 
-          // Operator mode: breadcrumb while tracking
+          // Operator: add crumbs while tracking
           if (!viewerMode && tracking) {
             if (!autoBreadcrumbFixOnly || fix) {
               setPoints((prev) => {
@@ -277,13 +271,12 @@ export default function App() {
             }
           }
 
-          // Viewer mode: breadcrumb only if control event says active
+          // Viewer: only while active via control event
           if (viewerMode && viewerTrackActive) {
             setPoints((prev) => {
               const next = [...prev, { lat, lon, ts: Date.now() }];
               if (prev.length > 0) {
                 const seg = haversine(prev[prev.length - 1], next[next.length - 1]);
-                // distance is not shown in viewer, but keep for completeness
                 setDistance((d) => d + seg);
               }
               return next;
@@ -291,30 +284,71 @@ export default function App() {
           }
         }
       } else if (isControl) {
-        // Expect messages like {"event":"start"} or {"event":"stop"}
         const ev = (js.event || "").toLowerCase();
         if (viewerMode) {
           if (ev === "start") {
             setViewerTrackActive(true);
             setPoints([]); setDistance(0); setElapsed(0);
+            setStartAt(Date.now());
           } else if (ev === "stop") {
             setViewerTrackActive(false);
             setPoints([]); setDistance(0); setElapsed(0);
+            setStartAt(null);
           }
         }
       }
     },
-    (_diag) => {} // optional diag log
+    (_diag) => {}
   );
 
-  // Timer for elapsed
+  /* ============= Auto-Connect ============= */
+  const manualDisconnectRef = useRef(false);
+  const [autoConnect, setAutoConnect] = useState(() => {
+    try {
+      const qs = new URLSearchParams(window.location.search);
+      const force = qs.get("autoconnect");
+      if (force === "1") return true;
+      if (force === "0") return false;
+    } catch {}
+    const saved = localStorage.getItem("k9.auto");
+    return saved ? saved === "true" : true;
+  });
+  useEffect(() => {
+    try {
+      const savedConn = JSON.parse(localStorage.getItem("k9.conn") || "null");
+      if (savedConn && typeof savedConn === "object") setConn((p) => ({ ...p, ...savedConn }));
+    } catch {}
+  }, []);
+  useEffect(() => { try { localStorage.setItem("k9.conn", JSON.stringify(conn)); } catch {} }, [conn]);
+  useEffect(() => { try { localStorage.setItem("k9.auto", autoConnect ? "true" : "false"); } catch {} }, [autoConnect]);
+  useEffect(() => {
+    if (viewerMode) { setAutoConnect(true); manualDisconnectRef.current = false; }
+  }, [viewerMode]);
+  const connectNow = () => { manualDisconnectRef.current = false; connect(); };
+  const disconnectNow = () => { manualDisconnectRef.current = true; disconnect(); };
+  useEffect(() => { if (autoConnect) connectNow(); /* on mount */ // eslint-disable-next-line
+  }, []);
+  useEffect(() => {
+    if (autoConnect && status === "idle" && !manualDisconnectRef.current) {
+      const t = setTimeout(connectNow, 150);
+      return () => clearTimeout(t);
+    }
+  }, [autoConnect, status]);
+
+  /* ============= Timer & Controls ============= */
   useInterval(() => {
     if (!viewerMode && tracking && startAt) setElapsed(Date.now() - startAt);
     if (viewerMode && viewerTrackActive && startAt) setElapsed(Date.now() - startAt);
   }, 1000);
 
-  // Start / Stop (operator)
-  const startTrack = async () => {
+  async function captureSnapshot() {
+    const node = document.getElementById("map-capture-root");
+    if (!node) return null;
+    try { return await htmlToImage.toPng(node, { cacheBust: true, pixelRatio: 2 }); }
+    catch { return null; }
+  }
+
+  async function startTrack() {
     if (!user) { alert("Sign in to start a track."); return; }
     try {
       const body = { device_id: DEVICE_ID, topic: conn.topic, is_public: true };
@@ -329,32 +363,16 @@ export default function App() {
       setPoints([]); setDistance(0);
       setStartAt(Date.now()); setElapsed(0);
       setTracking(true);
-      // (Optional) publish a control "start" from device or a separate tool, not from frontend
-    } catch (e) {
-      alert(e.message || String(e));
-    }
-  };
-
-  async function captureSnapshot() {
-    // Capture the map + overlay stats as a single PNG
-    const node = document.getElementById("map-capture-root");
-    if (!node) return null;
-    try {
-      const dataUrl = await htmlToImage.toPng(node, { cacheBust: true, pixelRatio: 2 });
-      return dataUrl;
-    } catch {
-      return null;
-    }
+    } catch (e) { alert(e.message || String(e)); }
   }
 
-  const stopTrack = async () => {
+  async function stopTrack() {
     if (!user) { alert("Sign in to stop a track."); return; }
     try {
       setTracking(false);
       const durMs = startAt ? Date.now() - startAt : 0;
       const dist = distance;
 
-      // Weather near midpoint
       const center = points.length ? points[Math.floor(points.length/2)] : last;
       let weather=null, elevationStats=null;
       try {
@@ -382,11 +400,8 @@ export default function App() {
 
       const pace = paceFrom(dist, durMs);
       const avg = avgSpeedFrom(dist, durMs);
-
-      // Snapshot
       const snapshotDataUrl = await captureSnapshot();
 
-      // Finish (and upload snapshot)
       const body = {
         id: trackId,
         device_id: DEVICE_ID,
@@ -413,32 +428,27 @@ export default function App() {
         elevation: elevationStats,
         points,
         snapshotUrl: resp.snapshot_url || null,
-        report_no: resp.report_no || null, // if your finish returns it; otherwise set on create
+        report_no: resp.report_no || null,
         paceMinPerKm: pace,
         avgSpeedKmh: avg,
       });
 
-      // reset runtime-only
       setStartAt(null);
-    } catch (e) {
-      alert(e.message || String(e));
-    }
-  };
+    } catch (e) { alert(e.message || String(e)); }
+  }
 
-  const clearTrack = () => {
+  function clearTrack() {
     setTracking(false);
     setPoints([]); setDistance(0); setElapsed(0); setStartAt(null);
     setSummary(null);
-  };
+  }
 
   const center = useMemo(() => {
     if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
     return [30, -97];
   }, [last]);
 
-  /* ======================
-     Layout
-  ====================== */
+  /* ============= Layout ============= */
   return (
     <div style={{height:'100vh', width:'100vw', display:'flex', background:'#f8fafc'}}>
       {/* Left Sidebar */}
@@ -456,9 +466,11 @@ export default function App() {
         <div style={{padding:12, overflow:'auto'}}>
           <ConnectionPanel
             conn={conn} setConn={setConn}
-            onConnect={connect} onDisconnect={disconnect}
+            onConnect={connectNow} onDisconnect={disconnectNow}
             status={status} msgs={msgs}
             errorMsg={errorMsg} lastPayload={lastPayload}
+            autoConnect={autoConnect} setAutoConnect={setAutoConnect}
+            pointsCount={points.length}
           />
 
           {last && (
@@ -478,12 +490,7 @@ export default function App() {
               <div style={{fontWeight:700, marginBottom:6}}>K9 Track Controls</div>
               {!user && <div style={{marginBottom:8, color:'#b91c1c'}}>Sign in to start/stop.</div>}
               <div style={{display:'flex', gap:8, marginBottom:8}}>
-               {!user && (
-  <div style={{ marginBottom: 8 }}>
-    <LoginCard />
-  </div>
-)}
-                 {!tracking ? (
+                {!tracking ? (
                   <button onClick={startTrack} disabled={!user} style={{padding:'6px 10px', borderRadius:10, background:'#16a34a', color:'#fff'}}>Start</button>
                 ) : (
                   <button onClick={stopTrack} disabled={!user} style={{padding:'6px 10px', borderRadius:10, background:'#dc2626', color:'#fff'}}>Stop</button>
@@ -525,19 +532,17 @@ export default function App() {
             </div>
           )}
 
-          {/* Viewer hint */}
           {viewerMode && (
             <div style={{marginTop:8, padding:12, background:'rgba(255,255,255,0.98)', border:'1px solid #e5e7eb', borderRadius:16, fontSize:12}}>
               <div style={{fontWeight:700, marginBottom:6}}>Viewer Mode</div>
-              <div>Breadcrumbs will appear only while a control message with <code>{"{event:\"start\"}"}</code> is published to <code>{`devices/${DEVICE_ID}/control`}</code>, and will clear on <code>{"{event:\"stop\"}"}</code>. Otherwise, only the live position is shown.</div>
+              <div>Breadcrumbs appear only while <code>{"{event:\"start\"}"}</code> is published to <code>{`devices/${DEVICE_ID}/control`}</code>, and are cleared on <code>{"{event:\"stop\"}"}</code>. Otherwise, only the live position is shown.</div>
             </div>
           )}
         </div>
       </div>
 
-      {/* Right: Map (capture root wraps map + stats overlay for snapshots) */}
+      {/* Right: Map + snapshot overlay */}
       <div id="map-capture-root" style={{flex:1, position:'relative'}}>
-        {/* Stats overlay for snapshot */}
         {(tracking || summary) && (
           <div style={{position:'absolute', top:12, right:12, zIndex:500, background:'rgba(255,255,255,0.95)', border:'1px solid #e5e7eb', borderRadius:12, padding:10, fontSize:12, boxShadow:'0 4px 16px rgba(0,0,0,.08)'}}>
             <div style={{fontWeight:700, marginBottom:6}}>K9 Track</div>
@@ -551,7 +556,10 @@ export default function App() {
           </div>
         )}
 
-        <MapContainer center={center} zoom={13} style={{height:'100%', width:'100%'}}>
+        <MapContainer center={useMemo(() => {
+          if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) return [last.lat, last.lon];
+          return [30, -97];
+        }, [last])} zoom={13} style={{height:'100%', width:'100%'}}>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
           {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
             <Recenter lat={last.lat} lon={last.lon} />
@@ -559,9 +567,6 @@ export default function App() {
           {last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
             <CircleMarker center={[last.lat, last.lon]} radius={8} pathOptions={{ color: "#111" }} />
           )}
-          {/* Draw polyline:
-              - Operator: only when on K9 tab and tracking or after stop (show the recorded path)
-              - Viewer: only while viewerTrackActive (control start), else no crumbs */}
           {(() => {
             const showCrumbs =
               (!viewerMode && (tab === "k9") && (tracking || (summary?.points?.length > 0))) ||
@@ -575,15 +580,7 @@ export default function App() {
           })()}
         </MapContainer>
       </div>
-
-      {/* Floating panel toggle for small screens */}
-      {!panelOpen && createPortal(
-        <button
-          onClick={() => setPanelOpen(true)}
-          style={{ position:'fixed', top:16, left:16, zIndex:1001, padding:'8px 12px', borderRadius:10, background:'#111', color:'#fff', border:'none', boxShadow:'0 4px 16px rgba(0,0,0,.12)'}}
-        >Connect</button>,
-        document.body
-      )}
     </div>
   );
 }
+
