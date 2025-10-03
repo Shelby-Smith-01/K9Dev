@@ -1,84 +1,59 @@
 // api/tracks/finish.js
-const { createClient } = require("@supabase/supabase-js");
+import { createClient } from "@supabase/supabase-js";
 
-function need(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
-}
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE
+);
 
-function dataUrlToBuffer(dataUrl) {
-  // data:image/png;base64,AAAA...
-  const m = /^data:(.+);base64,(.*)$/.exec(dataUrl || "");
-  if (!m) return null;
-  return {
-    contentType: m[1],
-    buffer: Buffer.from(m[2], "base64"),
-  };
-}
-
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.statusCode = 405;
-    return res.json({ error: "Method not allowed" });
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const supabase = createClient(need("SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE"));
-
     const {
-      id,                    // track id (required)
+      track_id,
       distance_m,
       duration_ms,
       pace_min_per_km,
       avg_speed_kmh,
       weather,
       elevation,
-      points,                // breadcrumb array
-      snapshotDataUrl        // OPTIONAL data URL (image/png, base64)
-    } = req.body || {};
+      points,
+      snapshotDataUrl, // "data:image/png;base64,...."
+    } = await req.body || req.json?.(); // supports Edge/Node
 
-    if (!id) {
-      res.statusCode = 400;
-      return res.json({ error: "Missing track id" });
-    }
+    if (!track_id) return res.status(400).json({ error: "missing track_id" });
 
-    // Optional: upload snapshot if provided as data URL
+    // 1) Upload snapshot if provided
     let snapshot_url = null;
-    if (snapshotDataUrl) {
-      const parsed = dataUrlToBuffer(snapshotDataUrl);
-      if (parsed && parsed.buffer?.length) {
-        const key = `tracks/${id}_${Date.now()}.png`;
+    try {
+      if (snapshotDataUrl?.startsWith("data:image")) {
+        const base64 = snapshotDataUrl.split(",")[1];
+        const bytes = Buffer.from(base64, "base64");
+        const key = `tracks/${track_id}/${Date.now()}.png`;
+
         const { error: upErr } = await supabase
           .storage
           .from("snapshots")
-          .upload(key, parsed.buffer, {
-            upsert: false,
-            contentType: parsed.contentType || "image/png",
-          });
+          .upload(key, bytes, { contentType: "image/png", upsert: true });
         if (upErr) throw upErr;
-        const { data: pub } = supabase.storage.from("snapshots").getPublicUrl(key);
+
+        const { data: pub } = supabase
+          .storage
+          .from("snapshots")
+          .getPublicUrl(key);
+
         snapshot_url = pub?.publicUrl || null;
       }
+    } catch (e) {
+      console.error("snapshot upload failed", e);
+      // continue without snapshot
     }
 
-    // If no report_no yet, mint one atomically (YYYY-MM-XX)
-    const { data: trackRow, error: fetchErr } = await supabase
-      .from("tracks")
-      .select("report_no")
-      .eq("id", id)
-      .single();
-    if (fetchErr) throw fetchErr;
-
-    let report_no = trackRow?.report_no || null;
-    if (!report_no) {
-      const { data: nextNo, error: rpcErr } = await supabase.rpc("next_track_report_no");
-      if (rpcErr) throw rpcErr;
-      report_no = nextNo;
-    }
-
-    // Persist the summary
-    const { error: upErr2 } = await supabase
+    // 2) Update track row with summary + snapshot_url
+    const { data, error } = await supabase
       .from("tracks")
       .update({
         ended_at: new Date().toISOString(),
@@ -89,14 +64,22 @@ module.exports = async (req, res) => {
         weather,
         elevation,
         points,
-        snapshot_url: snapshot_url || null,
-        report_no,
+        snapshot_url, // <- public URL we just generated (or null)
       })
-      .eq("id", id);
-    if (upErr2) throw upErr2;
+      .eq("id", track_id)
+      .select("id, snapshot_url")
+      .single();
 
-    res.status(200).json({ ok: true, id, report_no, snapshot_url });
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({
+      ok: true,
+      id: data.id,
+      snapshot_url: data.snapshot_url,
+    });
   } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
+    console.error("finish handler error", e);
+    return res.status(500).json({ error: e.message || String(e) });
   }
-};
+}
+
