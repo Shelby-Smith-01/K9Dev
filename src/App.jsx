@@ -592,36 +592,50 @@ export default function App() {
             <div>Distance: {prettyDistance(distance)}</div>
             <div style={{ fontSize: 12, color: "#64748b" }}>Crumbs: {points.length}</div>
 
-            {/* Summary after Stop */}
-            {summary && !tracking && (
-              <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
-                <div>Track #: {finalReportNo}</div>
-                <div>Track ID: {trackId || "—"}</div>
-                <div>Distance: {prettyDistance(summary.distance)}</div>
-                <div>Duration: {prettyDuration(summary.durationMs)}</div>
-                <div>Pace: {summary.pace_label ?? "—"}</div>
-                <div>Avg speed: {summary.avg_speed_label ?? "—"}</div>
-                <div>
-                  Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
-                </div>
-                <div>
-                  Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
-                </div>
-                {(summary.snapshotUrl || summary.snapshotDataUrl) && (
-                  <div style={{ marginTop: 8 }}>
-                    <img
-                      src={summary.snapshotUrl || summary.snapshotDataUrl}
-                      alt="snapshot"
-                      style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
-                      onError={(e) => { e.currentTarget.alt = `Failed to load: ${summary.snapshotUrl || summary.snapshotDataUrl}`; }}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+           {summary && !tracking && (
+  <div style={{ marginTop: 8, padding: 8, background: "#f1f5f9", borderRadius: 8 }}>
+    <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
+    <div>Track #: {finalReportNo}</div>
+    <div>Track ID: {trackId || "—"}</div>
+    <div>Distance: {prettyDistance(summary.distance)}</div>
+    <div>Duration: {prettyDuration(summary.durationMs)}</div>
+    <div>Pace: {summary.pace_label ?? "—"}</div>
+    <div>Avg speed: {summary.avg_speed_label ?? "—"}</div>
+    <div>
+      Weather: {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : "—"}
+    </div>
+    <div>
+      Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
+    </div>
+    {(() => {
+      // Prefer immediate in-memory snapshot first; then fallback to server URL.
+      const snapData = summary?.snapshotDataUrl || "";
+      const snapUrl  = summary?.snapshotUrl || "";
+      const src = snapData || snapUrl;
+      if (!src) return null;
+      return (
+        <div style={{ marginTop: 8 }}>
+          <img
+            src={src}
+            alt="snapshot"
+            style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
+            onError={(e) => {
+              // If data URL fails (rare), try server URL; if that fails, show a friendly message.
+              if (snapData && snapUrl && e.currentTarget.src === snapData) {
+                e.currentTarget.src = snapUrl;
+              } else {
+                const el = document.createElement("div");
+                el.style.cssText = "color:#b91c1c;font-size:12px;margin-top:4px";
+                el.textContent = "Snapshot preview failed to load.";
+                e.currentTarget.replaceWith(el);
+              }
+            }}
+          />
+        </div>
+      );
+    })()}
+  </div>
+)}
 
         {/* Report form after stop (operators only) */}
         {!isViewer && tab === "k9" && summary && !tracking && (
