@@ -64,6 +64,31 @@ function computeMetrics(distanceM, durationMs) {
 }
 
 /* =========================
+   Point guards for snapshot/fit
+========================= */
+function isValidLatLon(lat, lon) {
+  return Number.isFinite(lat) &&
+         Number.isFinite(lon) &&
+         Math.abs(lat) <= 85 &&
+         Math.abs(lon) <= 180 &&
+         !(Math.abs(lat) < 0.0001 && Math.abs(lon) < 0.0001); // drop near (0,0)
+}
+
+function sanitizeForFit(pts) {
+  const v = pts.filter(p => isValidLatLon(p.lat, p.lon));
+  if (v.length <= 2) return v;
+
+  const lats = v.map(p => p.lat).sort((a, b) => a - b);
+  const lons = v.map(p => p.lon).sort((a, b) => a - b);
+  const medLat = lats[Math.floor(lats.length / 2)];
+  const medLon = lons[Math.floor(lons.length / 2)];
+  const center = { lat: medLat, lon: medLon };
+
+  // keep within 5 km of median to drop far-out spikes
+  return v.filter(p => haversine(center, p) < 5000);
+}
+
+/* =========================
    SSE bridge to /api/stream
 ========================= */
 const defaultConn = {
@@ -78,7 +103,6 @@ function useSSE(conn, onMessage) {
   const [msgs, setMsgs] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const esRef = useRef(null);
-
   const onMsgRef = useRef(onMessage);
   useEffect(() => { onMsgRef.current = onMessage; }, [onMessage]);
 
@@ -200,12 +224,11 @@ function buildPdfProps(summary, extras = {}) {
    Main App
 ========================= */
 export default function App() {
-  // viewer mode hides controls: ?viewer=1
   const isViewer =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("viewer") === "1";
 
-  const [tab, setTab] = useState("k9");
+  const [tab, setTab] = useState(isViewer ? "live" : "k9");
   const [conn, setConn] = useState(defaultConn);
   const [last, setLast] = useState(null);
   const [points, setPoints] = useState([]);
@@ -223,20 +246,23 @@ export default function App() {
   const [latestReportNo, setLatestReportNo] = useState("");
 
   const mapShotRef = useRef(null);
-  const mapRef = useRef(null); // for fit to track
+  const mapRef = useRef(null);
   const deviceId = "esp-shelby-01";
 
   const { status, msgs, errorMsg, connect, disconnect } = useSSE(conn, (msg) => {
     if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) {
       setLast(msg);
-      if (tracking) {
+      if (tracking && msg.fix && isValidLatLon(msg.lat, msg.lon)) {
         setPoints((prev) => {
           const newPt = { lat: msg.lat, lon: msg.lon, ts: Date.now() };
-          if (!Number.isFinite(newPt.lat) || !Number.isFinite(newPt.lon)) return prev;
           const lastPt = prev.length ? prev[prev.length - 1] : null;
-          const seg = lastPt ? haversine(lastPt, newPt) : 0;
-          if (lastPt && seg < 0.5) return prev; // ignore tiny jitter <0.5m
-          if (lastPt) setDistance((d) => d + seg);
+
+          if (lastPt) {
+            const seg = haversine(lastPt, newPt);
+            if (seg < 0.5) return prev; // ignore small jitter
+            if (seg > 2000) return prev; // drop teleports > 2 km
+            setDistance((d) => d + seg);
+          }
           return [...prev, newPt];
         });
       }
@@ -246,22 +272,25 @@ export default function App() {
   // Auto-connect SSE on mount
   useEffect(() => { connect(); /* eslint-disable-next-line */ }, []);
 
-  // timer for K9 elapsed
+  // timer for elapsed
   useInterval(() => { if (tracking && startAt) setElapsed(Date.now() - startAt); }, 1000);
 
-  // Fit map to full track and wait until render completes; return restorer
+  // Fit to track safely and wait for render; return restorer
   async function fitMapToTrack(pts) {
     const map = mapRef.current;
-    if (!map || !pts || pts.length === 0) return null;
+    if (!map) return null;
+
+    const clean = sanitizeForFit(pts || []);
+    if (clean.length === 0) return null;
 
     const prevCenter = map.getCenter();
     const prevZoom = map.getZoom();
 
-    const bounds =
-      pts.length === 1
-        ? [[pts[0].lat, pts[0].lon], [pts[0].lat, pts[0].lon]]
-        : pts.map((p) => [p.lat, p.lon]);
+    const bounds = clean.length === 1
+      ? [[clean[0].lat, clean[0].lon], [clean[0].lat, clean[0].lon]]
+      : clean.map(p => [p.lat, p.lon]);
 
+    map.invalidateSize();
     map.fitBounds(bounds, { padding: [40, 40] });
 
     await new Promise((resolve) => {
@@ -274,7 +303,7 @@ export default function App() {
         }
       };
       map.once("moveend", onEnd);
-      setTimeout(onEnd, 700); // fallback
+      setTimeout(onEnd, 800); // fallback
     });
 
     return () => map.setView(prevCenter, prevZoom, { animate: false });
@@ -287,7 +316,6 @@ export default function App() {
     setReportSubmitted(false); setSubmittedReport(null);
     setLatestReportNo(""); setTrackId(null);
 
-    // create the track record now to get id + report_no
     try {
       const resp = await fetch("/api/tracks/create", {
         method: "POST",
@@ -315,7 +343,7 @@ export default function App() {
     setTracking(false);
     const durMs = startAt ? Date.now() - startAt : 0;
 
-    const pts = points.slice();
+    const pts = sanitizeForFit(points.slice());
     let dist = 0;
     for (let i = 1; i < pts.length; i++) dist += haversine(pts[i - 1], pts[i]);
 
@@ -354,7 +382,7 @@ export default function App() {
     const { avg_speed_kmh, pace_min_per_km, pace_label, avg_speed_label } =
       computeMetrics(dist, durMs);
 
-    // Snapshot (auto-fit → capture → restore). Hardened for CORS with fallback.
+    // Snapshot (auto-fit → capture → restore) with fallback
     let snapshotDataUrl = null;
     let restoreView = null;
 
@@ -362,7 +390,6 @@ export default function App() {
       if (pts.length) restoreView = await fitMapToTrack(pts);
 
       if (mapShotRef.current) {
-        // first attempt: full map + tiles
         snapshotDataUrl = await htmlToImage.toPng(mapShotRef.current, {
           cacheBust: true,
           useCORS: true,
@@ -377,11 +404,9 @@ export default function App() {
     }
 
     if (!snapshotDataUrl && mapShotRef.current) {
-      // fallback: snapshot overlays only (hide raster tiles)
       const tileImgs = mapShotRef.current.querySelectorAll(".leaflet-tile-pane img");
       const prev = [];
       tileImgs.forEach((img) => { prev.push(img.style.opacity); img.style.opacity = "0"; });
-
       try {
         snapshotDataUrl = await htmlToImage.toPng(mapShotRef.current, {
           cacheBust: true,
@@ -409,10 +434,10 @@ export default function App() {
       weather,
       elevation,
       points: pts,
-      snapshotDataUrl, // keep in-memory snapshot immediately
+      snapshotDataUrl,
     });
 
-    // persist to backend
+    // persist to backend (finish)
     try {
       if (trackId) {
         const resp = await fetch("/api/tracks/finish", {
@@ -432,7 +457,6 @@ export default function App() {
         });
         const js = await resp.json().catch(() => ({}));
         if (resp.ok) {
-          // Merge carefully: keep data URL, add server URL if present
           setSummary((s) => ({
             ...s,
             snapshotUrl: js?.snapshot_url || s?.snapshotUrl || null,
@@ -448,7 +472,7 @@ export default function App() {
     }
   };
 
-  // Backfill report_no if API didn't return it immediately
+  // Backfill report_no if API didn’t return immediately
   useEffect(() => {
     (async () => {
       if (trackId && !latestReportNo) {
@@ -637,7 +661,7 @@ export default function App() {
                   Elevation: {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : "—"}
                 </div>
 
-                {/* Snapshot preview: prefer data URL, fallback to server URL, then friendly text */}
+                {/* Snapshot preview (prefer data URL, fallback to server URL) */}
                 {(() => {
                   const snapData = summary?.snapshotDataUrl || "";
                   const snapUrl  = summary?.snapshotUrl || "";
@@ -651,7 +675,7 @@ export default function App() {
                         style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid #e5e7eb" }}
                         onError={(e) => {
                           if (snapData && snapUrl && e.currentTarget.src === snapData) {
-                            e.currentTarget.src = snapUrl; // try server URL
+                            e.currentTarget.src = snapUrl;
                           } else {
                             const note = document.createElement("div");
                             note.style.cssText = "color:#b91c1c;font-size:12px;margin-top:4px";
@@ -767,8 +791,9 @@ export default function App() {
           style={{ height: "100%", width: "100%" }}
         >
           <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution="&copy; OpenStreetMap"
+            // CORS-friendly tiles for snapshot reliability
+            url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+            attribution='&copy; OpenStreetMap &copy; CARTO'
             crossOrigin="anonymous"
           />
           {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
