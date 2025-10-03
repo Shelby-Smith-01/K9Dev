@@ -1,46 +1,94 @@
 // api/forms/report.js
+// Server-only route to insert a report into public.reports using the SERVICE ROLE key.
+// Runtime: node (NOT edge)
+
 const { createClient } = require("@supabase/supabase-js");
 
 function need(name) {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
+  if (!v) throw new Error(`Missing environment variable: ${name}`);
   return v;
 }
 
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
     res.statusCode = 405;
-    return res.json({ error: "Method not allowed" });
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({ error: "Method not allowed" }));
+  }
+
+  let supabase;
+  try {
+    const url = need("SUPABASE_URL");
+    const serviceKey = need("SUPABASE_SERVICE_ROLE");
+    supabase = createClient(url, serviceKey, { auth: { persistSession: false } });
+  } catch (e) {
+    console.error("env error:", e);
+    res.statusCode = 500;
+    return res.end(JSON.stringify({ error: e.message || String(e) }));
   }
 
   try {
-    const supabase = createClient(need("SUPABASE_URL"), need("SUPABASE_SERVICE_ROLE"));
-
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     const {
-      handler, dog, email, track_id, notes,
-      attachment_url,     // optional uploaded file (from Storage)
-      map_snapshot_url    // <-- pass snapshotUrl from the app if you want it shown in the report
-    } = req.body || {};
+      handler,         // required
+      dog,             // required
+      email,           // optional
+      notes,           // optional
+      track_id,        // optional (uuid)
+      attachment_url,  // optional
+      department_name, // optional
+      logo_url         // optional
+    } = body;
 
+    // Validate
     if (!handler || !dog) {
       res.statusCode = 400;
-      return res.json({ error: "handler and dog are required" });
+      return res.end(JSON.stringify({ error: "handler and dog are required" }));
     }
+    if (track_id && !/^[0-9a-f-]{36}$/i.test(track_id)) {
+      res.statusCode = 400;
+      return res.end(JSON.stringify({ error: "track_id must be a UUID" }));
+    }
+
+    // Compose insert payload; include optional branding fields if your table has them
+    const payload = {
+      handler,
+      dog,
+      email: email || null,
+      notes: notes || null,
+      track_id: track_id || null,
+      attachment_url: attachment_url || null,
+      // If you added these columns to `reports`, keep them. Otherwise remove:
+      department_name: department_name || null,
+      logo_url: logo_url || null,
+    };
 
     const { data, error } = await supabase
       .from("reports")
-      .insert([{
-        handler, dog, email, track_id, notes,
-        attachment_url: attachment_url || map_snapshot_url || null,
-        map_snapshot_url: map_snapshot_url || null
-      }])
-      .select()
+      .insert(payload)
+      .select("id, created_at")
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error("supabase insert error:", error);
+      res.statusCode = 500;
+      return res.end(JSON.stringify({ error: error.message || String(error) }));
+    }
 
-    res.status(200).json({ ok: true, id: data.id });
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({ ok: true, id: data.id, created_at: data.created_at }));
   } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
+    console.error("report route error:", e);
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "application/json");
+    return res.end(JSON.stringify({ error: e.message || String(e) }));
   }
 };
+
+// Vercel config: ensure node runtime (not edge)
+module.exports.config = {
+  runtime: "nodejs",
+};
+
