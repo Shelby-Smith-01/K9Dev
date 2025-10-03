@@ -478,7 +478,12 @@ export default function App() {
               <div style={{fontWeight:700, marginBottom:6}}>K9 Track Controls</div>
               {!user && <div style={{marginBottom:8, color:'#b91c1c'}}>Sign in to start/stop.</div>}
               <div style={{display:'flex', gap:8, marginBottom:8}}>
-                {!tracking ? (
+               {!user && (
+  <div style={{ marginBottom: 8 }}>
+    <LoginCard />
+  </div>
+)}
+                 {!tracking ? (
                   <button onClick={startTrack} disabled={!user} style={{padding:'6px 10px', borderRadius:10, background:'#16a34a', color:'#fff'}}>Start</button>
                 ) : (
                   <button onClick={stopTrack} disabled={!user} style={{padding:'6px 10px', borderRadius:10, background:'#dc2626', color:'#fff'}}>Stop</button>
