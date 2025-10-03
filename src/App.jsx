@@ -792,8 +792,8 @@ export default function App() {
         >
           <TileLayer
             // CORS-friendly tiles for snapshot reliability
-            url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-            attribution='&copy; OpenStreetMap &copy; CARTO'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution="&copy; OpenStreetMap contributors"
             crossOrigin="anonymous"
           />
           {recenterOnUpdate && last && Number.isFinite(last.lat) && Number.isFinite(last.lon) && (
