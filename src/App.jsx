@@ -7,7 +7,7 @@ import ReportPDF from "./components/ReportPDF";
 import ReportForm from "./components/ReportForm";
 import { supabase } from "./lib/supabaseClient";
 
-/* ============= Utilities ============= */
+/* ================= Utilities ================= */
 const haversine = (a, b) => {
   if (!a || !b) return 0;
   if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon) || !Number.isFinite(b.lat) || !Number.isFinite(b.lon)) return 0;
@@ -54,7 +54,7 @@ function useInterval(callback, delay) {
   }, [delay]);
 }
 
-/* ============= Config ============= */
+/* ================= Config ================= */
 const DEVICE_ID = "esp-shelby-01";
 const defaultConn = {
   host: "broker.emqx.io",
@@ -63,7 +63,7 @@ const defaultConn = {
   topic: `devices/${DEVICE_ID}/#`,
 };
 
-/* ============= SSE Bridge (MQTT -> SSE) ============= */
+/* =========== SSE Bridge (MQTT -> SSE) =========== */
 function useSSE(conn, onMessage, onDiag) {
   const [status, setStatus] = useState("idle");
   const [msgs, setMsgs] = useState(0);
@@ -108,9 +108,7 @@ function useSSE(conn, onMessage, onDiag) {
         } else {
           if (diagRef.current) diagRef.current(data);
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
     };
 
     es.addEventListener("message", handle);
@@ -128,7 +126,7 @@ function useSSE(conn, onMessage, onDiag) {
   return { status, msgs, errorMsg, lastPayload, connect, disconnect };
 }
 
-/* ============= Map Helpers ============= */
+/* ================= Map Helpers ================= */
 function Recenter({ lat, lon }) {
   const map = useMap();
   useEffect(() => {
@@ -137,7 +135,7 @@ function Recenter({ lat, lon }) {
   return null;
 }
 
-/* ============= Connection Panel ============= */
+/* ============== Connection Panel ============== */
 function ConnectionPanel({
   conn, setConn,
   onConnect, onDisconnect,
@@ -199,7 +197,7 @@ function ConnectionPanel({
   );
 }
 
-/* ============= App ============= */
+/* ===================== App ===================== */
 export default function App() {
   const urlq = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
   const viewerMode = urlq.get("viewer") === "1";
@@ -221,6 +219,7 @@ export default function App() {
   const [trackId, setTrackId] = useState(null);
   const [summary, setSummary] = useState(null);
 
+  // Supabase auth
   const [user, setUser] = useState(null);
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data?.user || null));
@@ -237,6 +236,21 @@ export default function App() {
       headers: { ...(options.headers||{}), ...(token ? { Authorization: `Bearer ${token}` } : {}) }
     });
   }
+
+  // Seed default report draft for autofill (Shelby, Rogue, TestPD@TestCity.Gov)
+  useEffect(() => {
+    try {
+      const existing = JSON.parse(localStorage.getItem("k9.reportDraft") || "{}");
+      if (!existing.handler && !existing.dog && !existing.email) {
+        localStorage.setItem("k9.reportDraft", JSON.stringify({
+          handler: "Shelby",
+          dog: "Rogue",
+          email: "TestPD@TestCity.Gov",
+          notes: ""
+        }));
+      }
+    } catch {}
+  }, []);
 
   // SSE hook
   const { status, msgs, errorMsg, lastPayload, connect, disconnect } = useSSE(
@@ -373,6 +387,7 @@ export default function App() {
       const durMs = startAt ? Date.now() - startAt : 0;
       const dist = distance;
 
+      // Weather near midpoint
       const center = points.length ? points[Math.floor(points.length/2)] : last;
       let weather=null, elevationStats=null;
       try {
@@ -398,7 +413,7 @@ export default function App() {
         }
       } catch {}
 
-      // numeric pace (minutes per km) and avg speed (km/h)
+      // numeric pace (min/km) + avg speed (km/h)
       const paceNum = (dist > 0 && durMs > 0) ? Number(((durMs / 60000) / (dist / 1000)).toFixed(3)) : null;
       let paceLabel = "—";
       if (paceNum != null) {
@@ -409,6 +424,7 @@ export default function App() {
       const avgNum = (dist > 0 && durMs > 0) ? Number(((dist / 1000) / (durMs / 3600000)).toFixed(2)) : null;
       const avgLabel = (avgNum != null) ? `${avgNum.toFixed(2)} km/h` : "—";
 
+      // Capture local snapshot BEFORE API call
       const snapshotDataUrl = await captureSnapshot();
 
       const body = {
@@ -416,8 +432,8 @@ export default function App() {
         device_id: DEVICE_ID,
         distance_m: dist,
         duration_ms: durMs,
-        pace_min_per_km: paceNum, // numeric for DB
-        avg_speed_kmh: avgNum,    // numeric for DB
+        pace_min_per_km: paceNum,
+        avg_speed_kmh: avgNum,
         weather,
         elevation: elevationStats,
         points,
@@ -436,10 +452,11 @@ export default function App() {
         weather,
         elevation: elevationStats,
         points,
-        snapshotUrl: resp.snapshot_url || null,
+        snapshotUrl: resp.snapshot_url || null,       // uploaded URL
+        snapshotDataUrl: snapshotDataUrl || null,     // local fallback
         report_no: resp.report_no || null,
-        paceMinPerKm: paceLabel,   // pretty for UI
-        avgSpeedKmh:  avgLabel,    // pretty for UI
+        paceMinPerKm: paceLabel,
+        avgSpeedKmh:  avgLabel,
         paceNum, avgNum
       });
 
@@ -458,7 +475,7 @@ export default function App() {
     return [30, -97];
   }, [last]);
 
-  /* ============= Layout ============= */
+  /* ================= Layout ================= */
   return (
     <div style={{height:'100vh', width:'100vw', display:'flex', background:'#f8fafc'}}>
       {/* Left Sidebar */}
@@ -522,67 +539,64 @@ export default function App() {
                   <div><b>Weather:</b> {summary.weather ? `${summary.weather.temperature}°C, wind ${summary.weather.windspeed} km/h` : '—'}</div>
                   <div><b>Elevation:</b> {summary.elevation ? `gain ${Math.round(summary.elevation.gain)} m, loss ${Math.round(summary.elevation.loss)} m` : '—'}</div>
 
-                  {/* ===== PDF Buttons ===== */}
-                  <div style={{marginTop:8, display:'flex', gap:8}}>
-                    {/* View in new tab */}
-                    <button
-                      onClick={async () => {
-                        const pdfProps = {
-                          departmentName: "Test PD",
-                          logoUrl: "https://flagcdn.com/w320/us.png",
-                          reportNo: summary?.report_no,
-                          createdAt: new Date().toISOString(),
-                          handler: "",  // fill via ReportForm if desired
-                          dog: "",
-                          email: "",
-                          deviceId: DEVICE_ID,
-                          trackId,
-                          distance_m: summary?.distance ?? 0,
-                          duration_ms: summary?.durationMs ?? 0,
-                          pace_label: summary?.paceMinPerKm ?? "",
-                          avg_speed_label: summary?.avgSpeedKmh ?? "",
-                          weather: summary?.weather,
-                          snapshotUrl: summary?.snapshotUrl,
-                          notes: "",
-                        };
-                        const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
-                        const url = URL.createObjectURL(blob);
-                        window.open(url, "_blank", "noopener,noreferrer");
-                        // URL.revokeObjectURL(url); // optional later
-                      }}
-                      style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}
-                    >
-                      View PDF
-                    </button>
+                  {/* Handler/K9 preview from draft or defaults */}
+                  {(() => {
+                    let draft={};
+                    try { draft = JSON.parse(localStorage.getItem("k9.reportDraft") || "{}"); } catch {}
+                    const H = draft.handler || "Shelby";
+                    const D = draft.dog || "Rogue";
+                    const E = draft.email || "TestPD@TestCity.Gov";
+                    return (
+                      <div style={{marginTop:6, fontSize:12, color:'#475569'}}>
+                        <b>Handler:</b> {H} &nbsp;·&nbsp; <b>K9:</b> {D} &nbsp;·&nbsp; <b>Email:</b> {E}
+                      </div>
+                    );
+                  })()}
 
-                    {/* Download */}
-                    <PDFDownloadLink
-                      document={
-                        <ReportPDF
-                          departmentName="Test PD"
-                          logoUrl="https://flagcdn.com/w320/us.png"
-                          reportNo={summary?.report_no}
-                          createdAt={new Date().toISOString()}
-                          handler=""
-                          dog=""
-                          email=""
-                          deviceId={DEVICE_ID}
-                          trackId={trackId}
-                          distance_m={summary?.distance ?? 0}
-                          duration_ms={summary?.durationMs ?? 0}
-                          pace_label={summary?.paceMinPerKm ?? ""}
-                          avg_speed_label={summary?.avgSpeedKmh ?? ""}
-                          weather={summary?.weather}
-                          snapshotUrl={summary?.snapshotUrl}
-                          notes=""
-                        />
-                      }
-                      fileName={`k9_report_${summary?.report_no || trackId || "report"}.pdf`}
-                      style={{padding:'6px 10px', borderRadius:10}}
-                    >
-                      {({ loading }) => loading ? "Building…" : "Download PDF"}
-                    </PDFDownloadLink>
-                  </div>
+                  {/* ===== PDF Buttons ===== */}
+                  {(() => {
+                    let draft={};
+                    try { draft = JSON.parse(localStorage.getItem("k9.reportDraft") || "{}"); } catch {}
+                    const pdfProps = {
+                      departmentName: "Test PD",
+                      logoUrl: "https://flagcdn.com/w320/us.png",
+                      reportNo: summary?.report_no,
+                      createdAt: new Date().toISOString(),
+                      handler: draft.handler || "Shelby",
+                      dog: draft.dog || "Rogue",
+                      email: draft.email || "TestPD@TestCity.Gov",
+                      deviceId: DEVICE_ID,
+                      trackId,
+                      distance_m: summary?.distance ?? 0,
+                      duration_ms: summary?.durationMs ?? 0,
+                      pace_label: summary?.paceMinPerKm ?? "",
+                      avg_speed_label: summary?.avgSpeedKmh ?? "",
+                      weather: summary?.weather,
+                      snapshotUrl: summary?.snapshotUrl || summary?.snapshotDataUrl || "",
+                      notes: draft.notes || "",
+                    };
+                    return (
+                      <div style={{marginTop:8, display:'flex', gap:8}}>
+                        <button
+                          onClick={async () => {
+                            const blob = await pdf(<ReportPDF {...pdfProps} />).toBlob();
+                            const url = URL.createObjectURL(blob);
+                            window.open(url, "_blank", "noopener,noreferrer");
+                          }}
+                          style={{padding:'6px 10px', borderRadius:10, background:'#111', color:'#fff'}}
+                        >
+                          View PDF
+                        </button>
+                        <PDFDownloadLink
+                          document={<ReportPDF {...pdfProps} />}
+                          fileName={`k9_report_${summary?.report_no || trackId || "report"}.pdf`}
+                          style={{padding:'6px 10px', borderRadius:10}}
+                        >
+                          {({ loading }) => loading ? "Building…" : "Download PDF"}
+                        </PDFDownloadLink>
+                      </div>
+                    );
+                  })()}
                   {/* ===== /PDF Buttons ===== */}
                 </div>
               )}
@@ -595,7 +609,7 @@ export default function App() {
               <ReportForm
                 defaultTrackId={trackId}
                 report_no={summary?.report_no}
-                snapshotUrl={summary?.snapshotUrl}
+                snapshotUrl={summary?.snapshotUrl || summary?.snapshotDataUrl || ""}
                 distance_m={summary?.distance ?? distance}
                 duration_ms={summary?.durationMs ?? elapsed}
                 pace_min_per_km={summary?.paceMinPerKm}
@@ -657,5 +671,6 @@ export default function App() {
     </div>
   );
 }
+
 
 
