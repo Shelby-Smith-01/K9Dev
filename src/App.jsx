@@ -64,7 +64,7 @@ function computeMetrics(distanceM, durationMs) {
 }
 
 /* =========================
-   SSE bridge to /api/stream
+   SSE bridge to /api/stream (FIXED: uses onMessage ref)
 ========================= */
 const defaultConn = {
   host: "broker.emqx.io",
@@ -77,6 +77,10 @@ function useSSE(conn, onMessage) {
   const [msgs, setMsgs] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
   const esRef = useRef(null);
+
+  // keep latest onMessage in a ref so listeners never get stale
+  const onMsgRef = useRef(onMessage);
+  useEffect(() => { onMsgRef.current = onMessage; }, [onMessage]);
 
   const connect = () => {
     try { esRef.current?.close(); } catch {}
@@ -116,7 +120,7 @@ function useSSE(conn, onMessage) {
             const lon = Number(m.lon ?? m.lng ?? m.longitude ?? m.Longitude ?? m.Lon);
             const fix = Boolean(m.fix ?? m.gpsFix ?? true);
             const sats = Number(m.sats ?? m.satellites ?? 0);
-            onMessage && onMessage({ lat, lon, fix, sats, raw: m });
+            onMsgRef.current && onMsgRef.current({ lat, lon, fix, sats, raw: m });
           } catch {}
         }
       } catch {}
@@ -169,14 +173,13 @@ function buildPdfProps(summary, extras = {}) {
     weather = null,
   } = summary || {};
 
-  // Prefer public Storage URL, fallback to data URL
   const snapshotUrl =
     (summary && (summary.snapshotUrl || summary.snapshotDataUrl)) || "";
 
   return {
     departmentName: "Test PD",
     logoUrl: "https://flagcdn.com/w320/us.png",
-    reportNo: extras.report_no || "", // <-- what ReportPDF expects
+    reportNo: extras.report_no || "",
     createdAt: new Date().toISOString(),
     handler: extras.handler || "Shelby",
     dog: extras.dog || "Rogue",
@@ -212,17 +215,15 @@ export default function App() {
   const [summary, setSummary] = useState(null);
   const [recenterOnUpdate, setRecenterOnUpdate] = useState(true);
 
-  // report-submit gating for PDF buttons
   const [reportSubmitted, setReportSubmitted] = useState(false);
   const [submittedReport, setSubmittedReport] = useState(null);
 
-  // track id and track number (report_no)
   const [trackId, setTrackId] = useState(null);
   const [latestReportNo, setLatestReportNo] = useState("");
 
   const mapShotRef = useRef(null);
 
-  // === Always collect crumbs while tracking (ignore <0.5 m jitter)
+  // === FIX: crumbs always collected while tracking; listener uses latest tracking via onMsgRef
   const { status, msgs, errorMsg, connect, disconnect } = useSSE(conn, (msg) => {
     if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) {
       setLast(msg);
@@ -235,12 +236,10 @@ export default function App() {
           const lastPt = prev.length ? prev[prev.length - 1] : null;
           const seg = lastPt ? haversine(lastPt, newPt) : 0;
 
-          // ignore ultra-tiny jitter < 0.5 m
+          // ignore jitter < 0.5 m
           if (lastPt && seg < 0.5) return prev;
 
-          // keep a running total so the UI updates live
           if (lastPt) setDistance((d) => d + seg);
-
           return [...prev, newPt];
         });
       }
@@ -259,7 +258,7 @@ export default function App() {
     setReportSubmitted(false); setSubmittedReport(null);
     setLatestReportNo("");
 
-    // Optionally create /api/tracks/create and setTrackId(newId) and maybe setLatestReportNo(js.report_no)
+    // Optionally call /api/tracks/create here and setTrackId + setLatestReportNo(js.report_no)
   };
 
   const stopTrack = async () => {
@@ -268,14 +267,11 @@ export default function App() {
     const durMs = startAt ? Date.now() - startAt : 0;
 
     const pts = points.slice();
-
-    // Recompute total distance from crumbs to be robust
+    // Recompute distance robustly
     let dist = 0;
-    for (let i = 1; i < pts.length; i++) {
-      dist += haversine(pts[i - 1], pts[i]);
-    }
+    for (let i = 1; i < pts.length; i++) dist += haversine(pts[i - 1], pts[i]);
 
-    // Pick a center point for weather sampling
+    // Weather/elevation
     const center = pts.length ? pts[Math.floor(pts.length / 2)] : last;
 
     let weather = null;
@@ -301,8 +297,7 @@ export default function App() {
           let gain = 0, loss = 0;
           for (let i = 1; i < els.length; i++) {
             const d = els[i] - els[i - 1];
-            if (d > 0) gain += d;
-            else loss += Math.abs(d);
+            if (d > 0) gain += d; else loss += Math.abs(d);
           }
           elevation = { gain, loss };
         }
@@ -312,7 +307,7 @@ export default function App() {
     const { avg_speed_kmh, pace_min_per_km, pace_label, avg_speed_label } =
       computeMetrics(dist, durMs);
 
-    // Snapshot the map wrapper
+    // Snapshot
     let snapshotDataUrl = null;
     try {
       if (mapShotRef.current) {
@@ -325,7 +320,6 @@ export default function App() {
       console.warn("snapshot failed", e);
     }
 
-    // Provisional summary (may be updated with snapshot URL/report_no from server)
     setSummary({
       distance: dist,
       durationMs: durMs,
@@ -336,10 +330,10 @@ export default function App() {
       weather,
       elevation,
       points: pts,
-      snapshotDataUrl, // may be replaced with server URL
+      snapshotDataUrl,
     });
 
-    // finalize on server (store metrics + upload snapshot) and capture report_no if returned
+    // Finalize server-side
     try {
       if (trackId) {
         const resp = await fetch("/api/tracks/finish", {
@@ -359,9 +353,7 @@ export default function App() {
         });
         const js = await resp.json().catch(() => ({}));
         if (resp.ok) {
-          if (js?.snapshot_url) {
-            setSummary((s) => ({ ...s, snapshotUrl: js.snapshot_url }));
-          }
+          if (js?.snapshot_url) setSummary((s) => ({ ...s, snapshotUrl: js.snapshot_url }));
           if (js?.report_no) {
             setSummary((s) => ({ ...s, report_no: js.report_no }));
             setLatestReportNo(js.report_no);
@@ -373,7 +365,7 @@ export default function App() {
     }
   };
 
-  // If we still don't have a report number, try fetching it by trackId
+  // Backfill report_no if missing
   useEffect(() => {
     (async () => {
       if (trackId && !latestReportNo) {
@@ -584,11 +576,6 @@ export default function App() {
               Msgs: {msgs}
             </span>
           </div>
-          {status === "error" && errorMsg && (
-            <div style={{ marginTop: 8, fontSize: 12, color: "#b91c1c", whiteSpace: "pre-wrap" }}>
-              {errorMsg}
-            </div>
-          )}
         </div>
 
         {last && (
@@ -680,6 +667,7 @@ export default function App() {
 
             <div>Time: {prettyDuration(elapsed)}</div>
             <div>Distance: {prettyDistance(distance)}</div>
+            <div style={{ fontSize: 12, color: "#64748b" }}>Crumbs: {points.length}</div>
 
             {/* Summary after Stop */}
             {summary && !tracking && (
@@ -692,7 +680,7 @@ export default function App() {
                 }}
               >
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>Summary</div>
-                <div>Track #: {finalReportNo}</div>
+                <div>Track #: {(submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)"}</div>
                 <div>Distance: {prettyDistance(summary.distance)}</div>
                 <div>Duration: {prettyDuration(summary.durationMs)}</div>
                 <div>Pace: {summary.pace_label ?? "—"}</div>
@@ -739,7 +727,7 @@ export default function App() {
           <div style={{ marginTop: 8 }}>
             <ReportForm
               defaultTrackId={trackId}
-              report_no={finalReportNo}
+              report_no={(submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)"}
               snapshotUrl={summary?.snapshotUrl || summary?.snapshotDataUrl || ""}
               device_id={"esp-shelby-01"}
               onSubmitted={(info) => {
@@ -764,18 +752,21 @@ export default function App() {
           >
             <div style={{ fontWeight: 600, marginBottom: 6 }}>Report PDF</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {/* Download PDF */}
               <PDFDownloadLink
-                document={<ReportPDF {...buildPdfProps(summary, {
-                  report_no: finalReportNo,
-                  handler: "Shelby",
-                  dog: "Rogue",
-                  email: "TestPD@TestCity.Gov",
-                  device_id: "esp-shelby-01",
-                  track_id: trackId || "",
-                  notes: submittedReport?.notes || "",
-                })} />}
-                fileName={`k9_report_${finalReportNo || "latest"}.pdf`}
+                document={
+                  <ReportPDF
+                    {...buildPdfProps(summary, {
+                      report_no: (submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)",
+                      handler: "Shelby",
+                      dog: "Rogue",
+                      email: "TestPD@TestCity.Gov",
+                      device_id: "esp-shelby-01",
+                      track_id: trackId || "",
+                      notes: submittedReport?.notes || "",
+                    })}
+                  />
+                }
+                fileName={`k9_report_${(submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "latest"}.pdf`}
               >
                 {({ loading }) => (
                   <button
@@ -791,7 +782,6 @@ export default function App() {
                 )}
               </PDFDownloadLink>
 
-              {/* View PDF in a new tab */}
               <button
                 onClick={async () => {
                   const w = window.open("", "_blank");
@@ -799,7 +789,7 @@ export default function App() {
                     const blob = await pdf(
                       <ReportPDF
                         {...buildPdfProps(summary, {
-                          report_no: finalReportNo,
+                          report_no: (submittedReport?.report_no) || (summary?.report_no) || latestReportNo || "(pending)",
                           handler: "Shelby",
                           dog: "Rogue",
                           email: "TestPD@TestCity.Gov",
